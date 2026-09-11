@@ -1,15 +1,33 @@
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
+
+const char* ssid = "VIVO V40E";
+const char* password = "120333544";
 
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(115200);
-  Serial.println("\n--- ESP8266 Online ---");
+  delay(100);
+
+  Serial.println("\n--- ESP8266 Wi-Fi Setup ---");
+
+  // Explicitly set ESP8266 as station (client) mode
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWi-Fi Connected successfully!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Signal Strength (RSSI): ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
 }
 
 void loop() {
-  digitalWrite(LED_BUILTIN, LOW);   // NodeMCU onboard LED turns ON (active LOW)
-  delay(1000);
-  digitalWrite(LED_BUILTIN, HIGH);  // NodeMCU onboard LED turns OFF
-  delay(1000);
-  Serial.println("Tick... LED toggled");
+  // Stay connected or perform network tasks here
 }
