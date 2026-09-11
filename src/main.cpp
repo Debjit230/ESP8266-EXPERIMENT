@@ -4,30 +4,44 @@
 const char* ssid = "VIVO V40E";
 const char* password = "120333544";
 
+unsigned long previousMillis = 0;
+bool ledState = HIGH;
+
 void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH); // Off by default (active LOW on NodeMCU)
+
   Serial.begin(115200);
   delay(100);
 
-  Serial.println("\n--- ESP8266 Wi-Fi Setup ---");
+  Serial.println("\n--- ESP8266 Wi-Fi with Status LED ---");
 
-  // Explicitly set ESP8266 as station (client) mode
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\nWi-Fi Connected successfully!");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("Signal Strength (RSSI): ");
-  Serial.print(WiFi.RSSI());
-  Serial.println(" dBm");
 }
 
 void loop() {
-  // Stay connected or perform network tasks here
+  unsigned long currentMillis = millis();
+
+  // Determine interval based on Wi-Fi connection state
+  bool isConnected = (WiFi.status() == WL_CONNECTED);
+  unsigned long blinkInterval = isConnected ? 1000 : 100; // 1000ms slow, 100ms fast
+
+  // Non-blocking LED toggle
+  if (currentMillis - previousMillis >= blinkInterval) {
+    previousMillis = currentMillis;
+    ledState = !ledState;
+    digitalWrite(LED_BUILTIN, ledState);
+
+    // Print connection confirmation only once right when connected
+    static bool loggedConnection = false;
+    if (isConnected && !loggedConnection) {
+      Serial.println("\nWi-Fi Connected!");
+      Serial.print("IP Address: ");
+      Serial.println(WiFi.localIP());
+      loggedConnection = true;
+    } else if (!isConnected) {
+      loggedConnection = false; // Reset flag if signal drops
+    }
+  }
 }
