@@ -1,110 +1,115 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 
-#define IR_PIN        A0  // Reverse-bias bare IR photodiode divider
-#define ALARM_LED     D1  // External visual indicator LED
+#define IR_PIN        A0  // Analog pin for bare IR photodiode
+#define ALARM_LED     D1  // GPIO5 via 220-ohm resistor
 
 const char* target_ssid = "VIVO V40E";
-const char* target_password = "120333544";
-
-// Dynamic threshold parameters
-int ambientBaseline = 0;
-int irThreshold = 150;
-const int SENSITIVITY_MARGIN = 60; // Offset above ambient light to trigger detection
+const char* target_password = "120333544"; // Put your exact password
 
 unsigned long previousMillis = 0;
-unsigned long lastLogTime = 0;
+unsigned long lastSensorPrint = 0;
 bool ledState = false;
+int baseline = 0;
 
-void bootIndicator() {
-  for (int i = 0; i < 5; i++) {
-    digitalWrite(LED_BUILTIN, LOW);
-    digitalWrite(ALARM_LED, HIGH);
-    delay(70);
-    digitalWrite(LED_BUILTIN, HIGH);
-    digitalWrite(ALARM_LED, LOW);
-    delay(70);
+void runWiFIScan() {
+  Serial.println("\n--------------------------------------------------");
+  Serial.println("Starting fresh 2.4 GHz Wi-Fi Scan...");
+  
+  // Clean radio state before scanning
+  WiFi.mode(WIFI_STA);
+  delay(100);
+
+  int n = WiFi.scanNetworks(false, true); // (async = false, show_hidden = true)
+
+  if (n == 0) {
+    Serial.println("[!] No networks found. Check phone hotspot band (must be 2.4 GHz)!");
+  } else {
+    Serial.printf("[+] Found %d networks:\n\n", n);
+    Serial.println("No. | SSID                             | RSSI     | Channel");
+    Serial.println("----+----------------------------------+----------+--------");
+    for (int i = 0; i < n; ++i) {
+      Serial.printf("%2d  | %-32.32s | %4d dBm | %2d\n",
+                    i + 1,
+                    WiFi.SSID(i).c_str(),
+                    WiFi.RSSI(i),
+                    WiFi.channel(i));
+    }
   }
-}
-
-// Samples room light for 1 second to calibrate baseline
-void calibrateAmbientLight() {
-  long sum = 0;
-  const int samples = 50;
-
-  Serial.println("Calibrating ambient IR baseline... keep sensor still.");
-  for (int i = 0; i < samples; i++) {
-    sum += analogRead(IR_PIN);
-    delay(20);
-  }
-
-  ambientBaseline = sum / samples;
-  irThreshold = ambientBaseline + SENSITIVITY_MARGIN;
-
-  Serial.printf("Calibration Complete -> Baseline: %d | Trigger Threshold: %d\n\n",
-                ambientBaseline, irThreshold);
+  Serial.println("--------------------------------------------------\n");
 }
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(ALARM_LED, OUTPUT);
-
-  bootIndicator();
+  digitalWrite(LED_BUILTIN, HIGH); // OFF
+  digitalWrite(ALARM_LED, LOW);    // OFF
 
   Serial.begin(115200);
-  delay(200);
-  Serial.println("\n--- ESP8266 IR Light Detector Online ---");
+  delay(1000); // Allow USB-Serial to settle
 
-  // Calibrate photodiode to room lighting
-  calibrateAmbientLight();
+  Serial.println("\n==========================================");
+  Serial.println("   ESP8266 FULL SYSTEM HARDWARE CHECK     ");
+  Serial.println("==========================================");
 
-  // Wi-Fi Configuration
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
+  // 1. Initial IR baseline reading
+  baseline = analogRead(IR_PIN);
+  Serial.printf("Initial IR Raw Reading on A0: %d (Range: 0 - 1023)\n", baseline);
 
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-  WiFi.setAutoReconnect(true);
+  // 2. Wi-Fi Scan
+  runWiFIScan();
 
-  Serial.printf("Connecting to Wi-Fi: %s\n", target_ssid);
+  // 3. Connect to Hotspot
+  Serial.printf("Connecting to Hotspot: %s\n", target_ssid);
   WiFi.begin(target_ssid, target_password);
+
+  int counter = 0;
+  while (WiFi.status() != WL_CONNECTED && counter < 25) {
+    delay(500);
+    Serial.print(".");
+    counter++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[SUCCESS] Connected to Wi-Fi!");
+    Serial.print("Local IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.printf("\n[FAILED] Wi-Fi Status: %d\n", WiFi.status());
+    Serial.println("(1 = SSID Not Found, 4 = Password Error, 6 = Disconnected)");
+  }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Read IR light intensity
-  int irLevel = analogRead(IR_PIN);
-  bool irDetected = (irLevel > irThreshold);
+  // 1. Read IR Sensor
+  int rawIR = analogRead(IR_PIN);
 
-  if (irDetected) {
-    // IR Source Detected: Lock both LEDs ON
+  // Print IR sensor output every 500ms so you can verify the hardware
+  if (currentMillis - lastSensorPrint >= 500) {
+    Serial.printf("Live A0 IR Value: %4d | Wi-Fi: %s\n",
+                  rawIR,
+                  (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "SEARCHING");
+    lastSensorPrint = currentMillis;
+  }
+
+  // 2. Check if IR light detected (reading jumps at least 50 above baseline)
+  bool irTriggered = (rawIR > (baseline + 50)) || (rawIR > 250);
+
+  if (irTriggered) {
     digitalWrite(ALARM_LED, HIGH);
-    digitalWrite(LED_BUILTIN, LOW); // NodeMCU onboard LED is active LOW
-
-    if (currentMillis - lastLogTime >= 200) {
-      Serial.printf(">>> [IR LIGHT DETECTED] Level: %d | Delta: +%d <<<\n",
-                    irLevel, (irLevel - ambientBaseline));
-      lastLogTime = currentMillis;
-    }
+    digitalWrite(LED_BUILTIN, LOW); // Onboard LED lit
   } else {
-    // 2. Wi-Fi Status Pulse when idle
+    // Regular blink indicator
     bool isConnected = (WiFi.status() == WL_CONNECTED);
-    unsigned long blinkInterval = isConnected ? 1000 : 100;
+    unsigned long blinkInterval = isConnected ? 1000 : 150;
 
     if (currentMillis - previousMillis >= blinkInterval) {
       previousMillis = currentMillis;
       ledState = !ledState;
-
       digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
       digitalWrite(ALARM_LED, ledState ? HIGH : LOW);
-    }
-
-    if (currentMillis - lastLogTime >= 1500) {
-      Serial.printf("Monitoring... Ambient: %d | Live Level: %d | Status: %s\n",
-                    ambientBaseline, irLevel, isConnected ? "Connected" : "Connecting");
-      lastLogTime = currentMillis;
     }
   }
 }
