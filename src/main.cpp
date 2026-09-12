@@ -1,16 +1,13 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 
-// Pin definitions
-#define SENSOR_PIN   D2  // HW-201 OUT pin (GPIO4)
-#define ALARM_LED    D1  // External Fire/Obstacle Alert LED (GPIO5)
+#define EXTERNAL_LED D1  // GPIO5 connected via 220 ohm resistor
 
 const char* target_ssid = "VIVO V40E";
-const char* target_password = "120333544";
+const char* target_password = "YOUR_PASSWORD"; // Put your password here
 
 unsigned long previousMillis = 0;
-unsigned long lastLogTime = 0;
-bool onboardLedState = HIGH;
+bool ledState = false;
 
 // Helper to convert encryption type enum to readable text
 String getEncryptionType(uint8_t encType) {
@@ -21,6 +18,18 @@ String getEncryptionType(uint8_t encType) {
     case ENC_TYPE_CCMP: return "WPA2/PSK";
     case ENC_TYPE_AUTO: return "WPA/WPA2/Auto";
     default:            return "Unknown";
+  }
+}
+
+// Visual boot indicator across both LEDs
+void bootIndicator() {
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(LED_BUILTIN, LOW);   // Onboard LED ON (active LOW)
+    digitalWrite(EXTERNAL_LED, HIGH); // External LED ON (active HIGH)
+    delay(80);
+    digitalWrite(LED_BUILTIN, HIGH);  // Onboard LED OFF
+    digitalWrite(EXTERNAL_LED, LOW);  // External LED OFF
+    delay(80);
   }
 }
 
@@ -51,24 +60,23 @@ void scanNearbyNetworks() {
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(ALARM_LED, OUTPUT);
-  pinMode(SENSOR_PIN, INPUT);
+  pinMode(EXTERNAL_LED, OUTPUT);
 
-  digitalWrite(LED_BUILTIN, HIGH); // Onboard LED off (Active LOW)
-  digitalWrite(ALARM_LED, LOW);    // Alarm LED off
+  // Initial startup flash
+  bootIndicator();
 
   Serial.begin(115200);
   delay(100);
+  Serial.println("\n--- ESP8266 System Starting ---");
 
-  // Initialize Wi-Fi in Station mode
+  // Wi-Fi initialization
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
 
-  // 1. Scan and print nearby networks
+  // Scan and display nearby networks
   scanNearbyNetworks();
 
-  // 2. Connect to your mobile hotspot
   Serial.printf("Connecting to target network: %s\n", target_ssid);
   WiFi.begin(target_ssid, target_password);
 }
@@ -76,29 +84,20 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Monitor the HW-201 IR Sensor (LOW = Triggered, HIGH = Idle)
-  int sensorState = digitalRead(SENSOR_PIN);
-
-  if (sensorState == LOW) {
-    digitalWrite(ALARM_LED, HIGH); // Turn on Fire Alert LED
-    if (currentMillis - lastLogTime >= 500) {
-      Serial.println(">>> [ALARM TRIGGERED] Fire / IR Detected! <<<");
-      lastLogTime = currentMillis;
-    }
-  } else {
-    digitalWrite(ALARM_LED, LOW);  // Safe
-  }
-
-  // 2. Non-blocking Wi-Fi status indicator on onboard LED
   bool isConnected = (WiFi.status() == WL_CONNECTED);
-  unsigned long blinkInterval = isConnected ? 1000 : 100; // 1s slow if connected, 100ms fast if searching
+  unsigned long blinkInterval = isConnected ? 1000 : 100; // 1s slow if connected, 100ms fast if connecting
 
   if (currentMillis - previousMillis >= blinkInterval) {
     previousMillis = currentMillis;
-    onboardLedState = !onboardLedState;
-    digitalWrite(LED_BUILTIN, onboardLedState);
+    ledState = !ledState;
 
-    // Print connection success message once upon connecting
+    // Toggle onboard LED (active LOW)
+    digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
+
+    // Toggle external LED on D1 (active HIGH)
+    digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
+
+    // Print Wi-Fi connection info once
     static bool loggedConnection = false;
     if (isConnected && !loggedConnection) {
       Serial.println("\n>>> Wi-Fi Connected Successfully! <<<");
