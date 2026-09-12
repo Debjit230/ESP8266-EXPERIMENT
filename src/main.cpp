@@ -1,15 +1,19 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 
-#define EXTERNAL_LED D1  // GPIO5 connected via 220 ohm resistor
+#define IR_PIN        A0  // Reverse-bias bare IR photodiode junction
+#define ALARM_LED     D1  // External LED on D1 (via 220 ohm resistor)
+
+// Adjust based on ambient room light readings from Serial Monitor
+const int FIRE_THRESHOLD = 200; 
 
 const char* target_ssid = "VIVO V40E";
-const char* target_password = "YOUR_PASSWORD"; // Put your password here
+const char* target_password = "120333544"; // Insert your hotspot password
 
 unsigned long previousMillis = 0;
+unsigned long lastSerialPrint = 0;
 bool ledState = false;
 
-// Helper to convert encryption type enum to readable text
 String getEncryptionType(uint8_t encType) {
   switch (encType) {
     case ENC_TYPE_NONE: return "Open";
@@ -21,14 +25,13 @@ String getEncryptionType(uint8_t encType) {
   }
 }
 
-// Visual boot indicator across both LEDs
 void bootIndicator() {
   for (int i = 0; i < 5; i++) {
-    digitalWrite(LED_BUILTIN, LOW);   // Onboard LED ON (active LOW)
-    digitalWrite(EXTERNAL_LED, HIGH); // External LED ON (active HIGH)
+    digitalWrite(LED_BUILTIN, LOW);   // Onboard ON (active LOW)
+    digitalWrite(ALARM_LED, HIGH);    // External ON (active HIGH)
     delay(80);
-    digitalWrite(LED_BUILTIN, HIGH);  // Onboard LED OFF
-    digitalWrite(EXTERNAL_LED, LOW);  // External LED OFF
+    digitalWrite(LED_BUILTIN, HIGH);  // Onboard OFF
+    digitalWrite(ALARM_LED, LOW);     // External OFF
     delay(80);
   }
 }
@@ -60,55 +63,71 @@ void scanNearbyNetworks() {
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(EXTERNAL_LED, OUTPUT);
+  pinMode(ALARM_LED, OUTPUT);
 
-  // Initial startup flash
+  // Run startup flash animation on both LEDs
   bootIndicator();
 
   Serial.begin(115200);
   delay(100);
-  Serial.println("\n--- ESP8266 System Starting ---");
+  Serial.println("\n--- ESP8266 Fire Alarm & Wi-Fi Node Online ---");
 
-  // Wi-Fi initialization
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
 
-  // Scan and display nearby networks
+  // Scan and print local networks
   scanNearbyNetworks();
 
-  Serial.printf("Connecting to target network: %s\n", target_ssid);
+  Serial.printf("Connecting to: %s\n", target_ssid);
   WiFi.begin(target_ssid, target_password);
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  bool isConnected = (WiFi.status() == WL_CONNECTED);
-  unsigned long blinkInterval = isConnected ? 1000 : 100; // 1s slow if connected, 100ms fast if connecting
+  // Read analog value from the IR divider circuit
+  int irLevel = analogRead(IR_PIN);
+  bool fireDetected = (irLevel > FIRE_THRESHOLD);
 
-  if (currentMillis - previousMillis >= blinkInterval) {
-    previousMillis = currentMillis;
-    ledState = !ledState;
+  if (fireDetected) {
+    // Fire Hazard: Turn both LEDs solidly ON
+    digitalWrite(ALARM_LED, HIGH);
+    digitalWrite(LED_BUILTIN, LOW);
 
-    // Toggle onboard LED (active LOW)
-    digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
+    if (currentMillis - lastSerialPrint >= 400) {
+      Serial.printf(">>> [FIRE HAZARD DETECTED!] Analog IR: %d (Threshold: %d) <<<\n", irLevel, FIRE_THRESHOLD);
+      lastSerialPrint = currentMillis;
+    }
+  } else {
+    // Normal operation: LEDs flash synchronously to reflect Wi-Fi status
+    bool isConnected = (WiFi.status() == WL_CONNECTED);
+    unsigned long blinkInterval = isConnected ? 1000 : 100; // 1000ms connected, 100ms searching
 
-    // Toggle external LED on D1 (active HIGH)
-    digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
+    if (currentMillis - previousMillis >= blinkInterval) {
+      previousMillis = currentMillis;
+      ledState = !ledState;
 
-    // Print Wi-Fi connection info once
-    static bool loggedConnection = false;
-    if (isConnected && !loggedConnection) {
-      Serial.println("\n>>> Wi-Fi Connected Successfully! <<<");
-      Serial.print("Assigned IP: ");
-      Serial.println(WiFi.localIP());
-      Serial.print("Signal Strength: ");
-      Serial.print(WiFi.RSSI());
-      Serial.println(" dBm\n");
-      loggedConnection = true;
-    } else if (!isConnected) {
-      loggedConnection = false;
+      digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
+      digitalWrite(ALARM_LED, ledState ? HIGH : LOW);
+
+      static bool loggedConnection = false;
+      if (isConnected && !loggedConnection) {
+        Serial.println("\n>>> Wi-Fi Connected Successfully! <<<");
+        Serial.print("Assigned IP: ");
+        Serial.println(WiFi.localIP());
+        Serial.print("Signal Strength: ");
+        Serial.print(WiFi.RSSI());
+        Serial.println(" dBm\n");
+        loggedConnection = true;
+      } else if (!isConnected) {
+        loggedConnection = false;
+      }
+    }
+
+    if (currentMillis - lastSerialPrint >= 1500) {
+      Serial.printf("Status: Safe | Ambient IR Level: %d\n", irLevel);
+      lastSerialPrint = currentMillis;
     }
   }
 }
