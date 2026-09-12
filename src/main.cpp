@@ -1,11 +1,16 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 
+// Pin definitions
+#define SENSOR_PIN   D2  // HW-201 OUT pin (GPIO4)
+#define ALARM_LED    D1  // External Fire/Obstacle Alert LED (GPIO5)
+
 const char* target_ssid = "VIVO V40E";
 const char* target_password = "120333544";
 
 unsigned long previousMillis = 0;
-bool ledState = HIGH;
+unsigned long lastLogTime = 0;
+bool onboardLedState = HIGH;
 
 // Helper to convert encryption type enum to readable text
 String getEncryptionType(uint8_t encType) {
@@ -22,10 +27,9 @@ String getEncryptionType(uint8_t encType) {
 void scanNearbyNetworks() {
   Serial.println("\n--------------------------------------------------");
   Serial.println("Scanning nearby 2.4 GHz Wi-Fi networks...");
-  
-  // WiFi.scanNetworks returns the total number of APs found
+
   int n = WiFi.scanNetworks();
-  
+
   if (n == 0) {
     Serial.println("No Wi-Fi networks found.");
   } else {
@@ -47,12 +51,16 @@ void scanNearbyNetworks() {
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH); // Active LOW -> OFF
+  pinMode(ALARM_LED, OUTPUT);
+  pinMode(SENSOR_PIN, INPUT);
+
+  digitalWrite(LED_BUILTIN, HIGH); // Onboard LED off (Active LOW)
+  digitalWrite(ALARM_LED, LOW);    // Alarm LED off
 
   Serial.begin(115200);
   delay(100);
 
-  // Put Wi-Fi in Station mode and disconnect from previous sessions
+  // Initialize Wi-Fi in Station mode
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
@@ -60,7 +68,7 @@ void setup() {
   // 1. Scan and print nearby networks
   scanNearbyNetworks();
 
-  // 2. Begin connecting to your target AP
+  // 2. Connect to your mobile hotspot
   Serial.printf("Connecting to target network: %s\n", target_ssid);
   WiFi.begin(target_ssid, target_password);
 }
@@ -68,22 +76,35 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Dynamic LED blink state: 1000ms if connected, 100ms if searching/disconnected
+  // 1. Monitor the HW-201 IR Sensor (LOW = Triggered, HIGH = Idle)
+  int sensorState = digitalRead(SENSOR_PIN);
+
+  if (sensorState == LOW) {
+    digitalWrite(ALARM_LED, HIGH); // Turn on Fire Alert LED
+    if (currentMillis - lastLogTime >= 500) {
+      Serial.println(">>> [ALARM TRIGGERED] Fire / IR Detected! <<<");
+      lastLogTime = currentMillis;
+    }
+  } else {
+    digitalWrite(ALARM_LED, LOW);  // Safe
+  }
+
+  // 2. Non-blocking Wi-Fi status indicator on onboard LED
   bool isConnected = (WiFi.status() == WL_CONNECTED);
-  unsigned long blinkInterval = isConnected ? 1000 : 100;
+  unsigned long blinkInterval = isConnected ? 1000 : 100; // 1s slow if connected, 100ms fast if searching
 
   if (currentMillis - previousMillis >= blinkInterval) {
     previousMillis = currentMillis;
-    ledState = !ledState;
-    digitalWrite(LED_BUILTIN, ledState);
+    onboardLedState = !onboardLedState;
+    digitalWrite(LED_BUILTIN, onboardLedState);
 
-    // Print connection success once
+    // Print connection success message once upon connecting
     static bool loggedConnection = false;
     if (isConnected && !loggedConnection) {
       Serial.println("\n>>> Wi-Fi Connected Successfully! <<<");
       Serial.print("Assigned IP: ");
       Serial.println(WiFi.localIP());
-      Serial.print("Target Signal: ");
+      Serial.print("Signal Strength: ");
       Serial.print(WiFi.RSSI());
       Serial.println(" dBm\n");
       loggedConnection = true;
