@@ -1,115 +1,130 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
-#define IR_PIN        A0  // Analog pin for bare IR photodiode
-#define ALARM_LED     D1  // GPIO5 via 220-ohm resistor
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-const char* target_ssid = "VIVO V40E";
-const char* target_password = "120333544"; // Put your exact password
+// Pin configurations
+#define OLED_SDA     D3  // GPIO0
+#define OLED_SCL     D4  // GPIO2
+#define EXTERNAL_LED D1  // External LED indicator via 220-ohm resistor
+
+const char* target_ssid = "Airfiber-3rdFloorBachelor";
+const char* target_password = "Airfiber-3rdfloor"; // Enter your hotspot password
+
 
 unsigned long previousMillis = 0;
-unsigned long lastSensorPrint = 0;
+unsigned long lastWifiCheck = 0;
 bool ledState = false;
-int baseline = 0;
 
-void runWiFIScan() {
-  Serial.println("\n--------------------------------------------------");
-  Serial.println("Starting fresh 2.4 GHz Wi-Fi Scan...");
-  
-  // Clean radio state before scanning
-  WiFi.mode(WIFI_STA);
-  delay(100);
+void oledPrint(const String& line1, const String& line2 = "", const String& line3 = "") {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
 
-  int n = WiFi.scanNetworks(false, true); // (async = false, show_hidden = true)
+  display.println(line1);
+  if (line2.length() > 0) display.println(line2);
+  if (line3.length() > 0) display.println(line3);
+  display.display();
 
-  if (n == 0) {
-    Serial.println("[!] No networks found. Check phone hotspot band (must be 2.4 GHz)!");
-  } else {
-    Serial.printf("[+] Found %d networks:\n\n", n);
-    Serial.println("No. | SSID                             | RSSI     | Channel");
-    Serial.println("----+----------------------------------+----------+--------");
-    for (int i = 0; i < n; ++i) {
-      Serial.printf("%2d  | %-32.32s | %4d dBm | %2d\n",
-                    i + 1,
-                    WiFi.SSID(i).c_str(),
-                    WiFi.RSSI(i),
-                    WiFi.channel(i));
-    }
+  Serial.println(line1);
+  if (line2.length() > 0) Serial.println(line2);
+  if (line3.length() > 0) Serial.println(line3);
+}
+
+// 4 Fast Blinks on startup
+void bootIndicator() {
+  for (int i = 0; i < 4; i++) {
+    digitalWrite(EXTERNAL_LED, HIGH);
+    delay(60);
+    digitalWrite(EXTERNAL_LED, LOW);
+    delay(60);
   }
-  Serial.println("--------------------------------------------------\n");
 }
 
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(ALARM_LED, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH); // OFF
-  digitalWrite(ALARM_LED, LOW);    // OFF
+  pinMode(EXTERNAL_LED, OUTPUT);
+  digitalWrite(EXTERNAL_LED, LOW);
+
+  // 1. Boot Indicator: 4 fast flashes on external LED
+  bootIndicator();
 
   Serial.begin(115200);
-  delay(1000); // Allow USB-Serial to settle
+  delay(200);
 
-  Serial.println("\n==========================================");
-  Serial.println("   ESP8266 FULL SYSTEM HARDWARE CHECK     ");
-  Serial.println("==========================================");
+  // 2. Initialize I2C explicitly on D3 (SDA) and D4 (SCL)
+  Wire.begin(OLED_SDA, OLED_SCL);
 
-  // 1. Initial IR baseline reading
-  baseline = analogRead(IR_PIN);
-  Serial.printf("Initial IR Raw Reading on A0: %d (Range: 0 - 1023)\n", baseline);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("[!] SSD1306 allocation failed. Check D3/D4 connections and 0x3C address!"));
+  } else {
+    display.clearDisplay();
+    display.display();
+  }
 
-  // 2. Wi-Fi Scan
-  runWiFIScan();
+  oledPrint("ESP8266 System Boot", "I2C: SDA->D3, SCL->D4", "Scanning 2.4GHz APs...");
+  delay(1000);
 
-  // 3. Connect to Hotspot
-  Serial.printf("Connecting to Hotspot: %s\n", target_ssid);
+  // 3. Scan nearby networks
+  WiFi.mode(WIFI_STA);
+  int n = WiFi.scanNetworks(false, true);
+  String scanMsg = "Found APs: " + String(n);
+  oledPrint("Wi-Fi Scan Complete", scanMsg, "Connecting to AP...");
+  delay(1000);
+
+  // 4. Connect to Hotspot
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.begin(target_ssid, target_password);
 
-  int counter = 0;
-  while (WiFi.status() != WL_CONNECTED && counter < 25) {
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 25) {
     delay(500);
-    Serial.print(".");
-    counter++;
+    attempts++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[SUCCESS] Connected to Wi-Fi!");
-    Serial.print("Local IP Address: ");
-    Serial.println(WiFi.localIP());
+    oledPrint("Wi-Fi: CONNECTED", "IP: " + WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm");
   } else {
-    Serial.printf("\n[FAILED] Wi-Fi Status: %d\n", WiFi.status());
-    Serial.println("(1 = SSID Not Found, 4 = Password Error, 6 = Disconnected)");
+    oledPrint("Wi-Fi: SEARCHING", "Background reconnecting", "SSID: " + String(target_ssid));
   }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Read IR Sensor
-  int rawIR = analogRead(IR_PIN);
-
-  // Print IR sensor output every 500ms so you can verify the hardware
-  if (currentMillis - lastSensorPrint >= 500) {
-    Serial.printf("Live A0 IR Value: %4d | Wi-Fi: %s\n",
-                  rawIR,
-                  (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "SEARCHING");
-    lastSensorPrint = currentMillis;
+  // Wi-Fi Reconnection Watchdog (every 5 seconds)
+  if (currentMillis - lastWifiCheck >= 5000) {
+    lastWifiCheck = currentMillis;
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.reconnect();
+      oledPrint("Wi-Fi: RECONNECTING", "Searching for AP...", "SSID: " + String(target_ssid));
+    }
   }
 
-  // 2. Check if IR light detected (reading jumps at least 50 above baseline)
-  bool irTriggered = (rawIR > (baseline + 50)) || (rawIR > 250);
+  // External LED Status Blink (1s slow if connected, 150ms fast if connecting)
+  bool isConnected = (WiFi.status() == WL_CONNECTED);
+  unsigned long blinkInterval = isConnected ? 1000 : 150;
 
-  if (irTriggered) {
-    digitalWrite(ALARM_LED, HIGH);
-    digitalWrite(LED_BUILTIN, LOW); // Onboard LED lit
-  } else {
-    // Regular blink indicator
-    bool isConnected = (WiFi.status() == WL_CONNECTED);
-    unsigned long blinkInterval = isConnected ? 1000 : 150;
+  if (currentMillis - previousMillis >= blinkInterval) {
+    previousMillis = currentMillis;
+    ledState = !ledState;
+    digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
 
-    if (currentMillis - previousMillis >= blinkInterval) {
-      previousMillis = currentMillis;
-      ledState = !ledState;
-      digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH);
-      digitalWrite(ALARM_LED, ledState ? HIGH : LOW);
+    // Refresh OLED state once connected
+    static bool updatedScreen = false;
+    if (isConnected && !updatedScreen) {
+      oledPrint("Status: ONLINE", "IP: " + WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm");
+      updatedScreen = true;
+    } else if (!isConnected) {
+      updatedScreen = false;
     }
   }
 }
