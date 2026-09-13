@@ -33,6 +33,11 @@ unsigned long lastClapTime = 0;
 unsigned long lastDisplayUpdate = 0;
 String lastIRCode = "None";
 
+// IR LED blink timing variables
+bool irBlinkActive = false;
+unsigned long irBlinkStart = 0;
+const unsigned long IR_BLINK_DURATION = 80; // Duration of flash in milliseconds
+
 void bootIndicator() {
   for (int i = 0; i < 4; i++) {
     digitalWrite(EXTERNAL_LED, HIGH);
@@ -76,24 +81,42 @@ void loop() {
   int soundBarWidth = map(soundAmplitude, 0, 350, 0, 120);
   soundBarWidth = constrain(soundBarWidth, 0, 120);
 
-  // 2. Software Clap Detection (checks for sudden acoustic transient)
+  // 2. Software Clap Detection (toggles base state)
   if (soundAmplitude > CLAP_DELTA) {
     if (currentMillis - lastClapTime > 300) { // 300ms debounce
       ledToggled = !ledToggled;
-      digitalWrite(EXTERNAL_LED, ledToggled ? HIGH : LOW);
-      Serial.printf(">>> [CLAP TRIGGERED] A0 Peak: %d | LED: %s <<<\n",
+      Serial.printf(">>> [CLAP TRIGGERED] A0 Peak: %d | Base State: %s <<<\n",
                     audioSample, ledToggled ? "ON" : "OFF");
       lastClapTime = currentMillis;
     }
   }
 
-  // 3. IR Remote Signal Capture
+  // 3. IR Remote Signal Capture & Trigger Flash
   if (irrecv.decode(&results)) {
     lastIRCode = "0x" + uint64ToString(results.value, HEX);
+    
+    // Trigger non-blocking visual feedback blink
+    irBlinkActive = true;
+    irBlinkStart = currentMillis;
+
+    Serial.printf(">>> [IR CAPTURED] Code: %s <<<\n", lastIRCode.c_str());
     irrecv.resume();
   }
 
-  // 4. OLED Display Refresh (~25 FPS)
+  // 4. Manage LED State (IR flash overrides or inverts base clap state)
+  if (irBlinkActive) {
+    if (currentMillis - irBlinkStart < IR_BLINK_DURATION) {
+      // Invert state during the blink pulse so it is visible whether clap LED is ON or OFF
+      digitalWrite(EXTERNAL_LED, ledToggled ? LOW : HIGH);
+    } else {
+      irBlinkActive = false;
+      digitalWrite(EXTERNAL_LED, ledToggled ? HIGH : LOW);
+    }
+  } else {
+    digitalWrite(EXTERNAL_LED, ledToggled ? HIGH : LOW);
+  }
+
+  // 5. OLED Display Refresh (~25 FPS)
   if (currentMillis - lastDisplayUpdate >= 40) {
     lastDisplayUpdate = currentMillis;
 
