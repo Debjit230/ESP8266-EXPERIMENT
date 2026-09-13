@@ -3,42 +3,68 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <IRremoteESP8266.h>
+#include <IRrecv.h>
+#include <IRutils.h>
 
+// OLED Configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Pin configurations
+// Pin Mappings
 #define OLED_SDA     D3  // GPIO0
 #define OLED_SCL     D4  // GPIO2
-#define EXTERNAL_LED D1  // External LED indicator via 220-ohm resistor
+#define IR_RECV_PIN  D2  // TSOP OUT Pin (GPIO4)
+#define EXTERNAL_LED D1  // Visual indicator LED
 
+const uint16_t kCaptureBufferSize = 1024;
+const uint8_t kTimeout = 50; // Milliseconds of silence to define message end
+
+IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kTimeout, true);
+decode_results results;
+
+// Wi-Fi Credentials
 const char* target_ssid = "Airfiber-3rdFloorBachelor";
 const char* target_password = "Airfiber-3rdfloor"; // Enter your hotspot password
-
 
 unsigned long previousMillis = 0;
 unsigned long lastWifiCheck = 0;
 bool ledState = false;
 
-void oledPrint(const String& line1, const String& line2 = "", const String& line3 = "") {
+// Function to update OLED interface
+void updateOLED(const String& protocol, const String& hexCode, int bits, const String& wifiStatus) {
   display.clearDisplay();
-  display.setCursor(0, 0);
-  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  display.println(line1);
-  if (line2.length() > 0) display.println(line2);
-  if (line3.length() > 0) display.println(line3);
-  display.display();
+  // Header Banner
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("--- IR DECODER ---");
 
-  Serial.println(line1);
-  if (line2.length() > 0) Serial.println(line2);
-  if (line3.length() > 0) Serial.println(line3);
+  // Protocol Info
+  display.setCursor(0, 14);
+  display.print("Proto: ");
+  display.println(protocol);
+
+  // Hex Code Value
+  display.setCursor(0, 26);
+  display.print("Code : ");
+  display.setTextSize(1);
+  display.println(hexCode);
+
+  // Bit Depth
+  display.setCursor(0, 38);
+  display.printf("Bits : %d-bit\n", bits);
+
+  // Wi-Fi Status Bar
+  display.setCursor(0, 52);
+  display.printf("WiFi : %s", wifiStatus.c_str());
+
+  display.display();
 }
 
-// 4 Fast Blinks on startup
 void bootIndicator() {
   for (int i = 0; i < 4; i++) {
     digitalWrite(EXTERNAL_LED, HIGH);
@@ -52,64 +78,73 @@ void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
   digitalWrite(EXTERNAL_LED, LOW);
 
-  // 1. Boot Indicator: 4 fast flashes on external LED
+  // 4 Fast Blinks on Boot
   bootIndicator();
 
   Serial.begin(115200);
   delay(200);
+  Serial.println("\n=== ESP8266 IR Remote Scanner & Decoder ===");
 
-  // 2. Initialize I2C explicitly on D3 (SDA) and D4 (SCL)
+  // Initialize I2C OLED on D3 & D4
   Wire.begin(OLED_SDA, OLED_SCL);
-
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("[!] SSD1306 allocation failed. Check D3/D4 connections and 0x3C address!"));
+    Serial.println(F("[!] SSD1306 allocation failed. Check D3/D4 connections!"));
   } else {
     display.clearDisplay();
     display.display();
   }
 
-  oledPrint("ESP8266 System Boot", "I2C: SDA->D3, SCL->D4", "Scanning 2.4GHz APs...");
-  delay(1000);
+  updateOLED("Ready", "Press Remote", 0, "Connecting...");
 
-  // 3. Scan nearby networks
-  WiFi.mode(WIFI_STA);
-  int n = WiFi.scanNetworks(false, true);
-  String scanMsg = "Found APs: " + String(n);
-  oledPrint("Wi-Fi Scan Complete", scanMsg, "Connecting to AP...");
-  delay(1000);
+  // Start IR Receiver
+  irrecv.enableIRIn();
+  Serial.printf("IR Receiver listening on Pin D2 (GPIO%d)...\n", IR_RECV_PIN);
 
-  // 4. Connect to Hotspot
+  // Initialize Wi-Fi
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.begin(target_ssid, target_password);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 25) {
-    delay(500);
-    attempts++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    oledPrint("Wi-Fi: CONNECTED", "IP: " + WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm");
-  } else {
-    oledPrint("Wi-Fi: SEARCHING", "Background reconnecting", "SSID: " + String(target_ssid));
-  }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Wi-Fi Reconnection Watchdog (every 5 seconds)
+  // 1. Check for incoming IR Remote Signal
+  if (irrecv.decode(&results)) {
+    // Pulse external LED quickly to confirm capture
+    digitalWrite(EXTERNAL_LED, HIGH);
+
+    String protocolStr = typeToString(results.decode_type);
+    String hexStr = "0x" + uint64ToString(results.value, HEX);
+
+    // Print detailed remote signature to Serial Monitor
+    Serial.println("\n--- IR SIGNAL DETECTED ---");
+    Serial.printf("Protocol : %s\n", protocolStr.c_str());
+    Serial.printf("Hex Code : %s\n", hexStr.c_str());
+    Serial.printf("Bit Depth: %d bits\n", results.bits);
+    Serial.println("Carrier  : Standard 38kHz Bandpass Filtered");
+
+    // Display captured code directly on the OLED
+    String wifiStatus = (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "OFFLINE";
+    updateOLED(protocolStr, hexStr, results.bits, wifiStatus);
+
+    delay(40);
+    digitalWrite(EXTERNAL_LED, LOW);
+
+    // Ready receiver for next signal
+    irrecv.resume();
+  }
+
+  // 2. Wi-Fi Reconnect Watchdog (every 5 seconds)
   if (currentMillis - lastWifiCheck >= 5000) {
     lastWifiCheck = currentMillis;
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.reconnect();
-      oledPrint("Wi-Fi: RECONNECTING", "Searching for AP...", "SSID: " + String(target_ssid));
     }
   }
 
-  // External LED Status Blink (1s slow if connected, 150ms fast if connecting)
+  // 3. Heartbeat LED blink when idle (1000ms if connected, 150ms if reconnecting)
   bool isConnected = (WiFi.status() == WL_CONNECTED);
   unsigned long blinkInterval = isConnected ? 1000 : 150;
 
@@ -117,14 +152,5 @@ void loop() {
     previousMillis = currentMillis;
     ledState = !ledState;
     digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
-
-    // Refresh OLED state once connected
-    static bool updatedScreen = false;
-    if (isConnected && !updatedScreen) {
-      oledPrint("Status: ONLINE", "IP: " + WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm");
-      updatedScreen = true;
-    } else if (!isConnected) {
-      updatedScreen = false;
-    }
   }
 }
