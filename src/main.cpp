@@ -271,7 +271,12 @@ void setup() {
   // Initialize OLED on D3 & D4
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+
+  // 180-degree display rotation (flips to the opposite orientation)
+  display.setRotation(2);
+
   display.clearDisplay();
+  display.display();
 
   // Boot into default mode (Radar)
   configureMode(MODE_RADAR);
