@@ -12,31 +12,54 @@
 #define OLED_RESET    -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Pin Mappings
-#define OLED_SDA      D3  // GPIO0
-#define OLED_SCL      D4  // GPIO2
-#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)
-#define AUDIO_ANA_PIN A0  // LM358 Pin 1 (OUT1)
-#define EXTERNAL_LED  D1  // Indicator LED via 220-ohm resistor
+#define OLED_SDA     D3  // GPIO0
+#define OLED_SCL     D4  // GPIO2
+#define IR_RECV_PIN  D2  // TSOP OUT Pin (GPIO4)
+#define EXTERNAL_LED D1  // Visual indicator LED
 
-// Sound & Clap Thresholds
-const int CLAP_DELTA = 180; // Spike required above/below baseline to trigger clap
+const uint16_t kCaptureBufferSize = 1024;
+const uint8_t kTimeout = 50; // Timeout in ms
 
-IRrecv irrecv(IR_RECV_PIN, 1024, 50, true);
+// Set save_buffer = true to analyze signals properly
+IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kTimeout, true);
 decode_results results;
 
 const char* target_ssid = "Airfiber-3rdFloorBachelor";
 const char* target_password = "Airfiber-3rdfloor";
 
-bool ledToggled = false;
-unsigned long lastClapTime = 0;
-unsigned long lastDisplayUpdate = 0;
-String lastIRCode = "None";
+unsigned long previousMillis = 0;
+unsigned long lastWifiCheck = 0;
+bool ledState = false;
 
-// IR LED blink timing variables
+// Non-blocking IR blink state
 bool irBlinkActive = false;
 unsigned long irBlinkStart = 0;
-const unsigned long IR_BLINK_DURATION = 80; // Duration of flash in milliseconds
+const unsigned long IR_BLINK_DURATION = 80;
+
+void updateOLED(const String& protocol, const String& hexCode, int bits, const String& wifiStatus) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("--- IR DECODER ---");
+
+  display.setCursor(0, 14);
+  display.print("Proto: ");
+  display.println(protocol);
+
+  display.setCursor(0, 26);
+  display.print("Code : ");
+  display.println(hexCode);
+
+  display.setCursor(0, 38);
+  display.printf("Bits : %d-bit\n", bits);
+
+  display.setCursor(0, 52);
+  display.printf("WiFi : %s", wifiStatus.c_str());
+
+  display.display();
+}
 
 void bootIndicator() {
   for (int i = 0; i < 4; i++) {
@@ -51,19 +74,29 @@ void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
   digitalWrite(EXTERNAL_LED, LOW);
 
+  // Enable internal pull-up on D2 to prevent floating pin noise
+  pinMode(IR_RECV_PIN, INPUT_PULLUP);
+
   bootIndicator();
 
   Serial.begin(115200);
   delay(200);
+  Serial.println("\n=== ESP8266 IR Remote Scanner & Decoder ===");
 
-  // Initialize OLED on D3 & D4
   Wire.begin(OLED_SDA, OLED_SCL);
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  display.clearDisplay();
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("[!] SSD1306 allocation failed."));
+  } else {
+    display.clearDisplay();
+    display.display();
+  }
 
+  updateOLED("Ready", "Press Remote", 0, "Connecting...");
+
+  // Start IR Receiver with noise threshold
+  irrecv.setUnknownThreshold(12); // Ignore short bursts < 12 ticks
   irrecv.enableIRIn();
 
-  // Connect to Wi-Fi
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
@@ -73,75 +106,61 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Read Audio Waveform from LM358 Pin 1
-  int audioSample = analogRead(AUDIO_ANA_PIN);
-  int soundAmplitude = abs(audioSample - 512); // Distance from 1.65V center
-
-  // Dynamic sound bar width for OLED
-  int soundBarWidth = map(soundAmplitude, 0, 350, 0, 120);
-  soundBarWidth = constrain(soundBarWidth, 0, 120);
-
-  // 2. Software Clap Detection (toggles base state)
-  if (soundAmplitude > CLAP_DELTA) {
-    if (currentMillis - lastClapTime > 300) { // 300ms debounce
-      ledToggled = !ledToggled;
-      Serial.printf(">>> [CLAP TRIGGERED] A0 Peak: %d | Base State: %s <<<\n",
-                    audioSample, ledToggled ? "ON" : "OFF");
-      lastClapTime = currentMillis;
-    }
-  }
-
-  // 3. IR Remote Signal Capture & Trigger Flash
+  // 1. Process Incoming IR Signal
   if (irrecv.decode(&results)) {
-    lastIRCode = "0x" + uint64ToString(results.value, HEX);
-    
-    // Trigger non-blocking visual feedback blink
-    irBlinkActive = true;
-    irBlinkStart = currentMillis;
+    // FILTER: Ignore UNKNOWN noise and invalid 0-bit bursts
+    bool isValidSignal = (results.decode_type != decode_type_t::UNKNOWN) && 
+                         (results.bits >= 8) && 
+                         (results.value != 0);
 
-    Serial.printf(">>> [IR CAPTURED] Code: %s <<<\n", lastIRCode.c_str());
+    if (isValidSignal) {
+      String protocolStr = typeToString(results.decode_type);
+      String hexStr = "0x" + uint64ToString(results.value, HEX);
+
+      Serial.println("\n--- VALID IR SIGNAL DETECTED ---");
+      Serial.printf("Protocol : %s\n", protocolStr.c_str());
+      Serial.printf("Hex Code : %s\n", hexStr.c_str());
+      Serial.printf("Bit Depth: %d bits\n", results.bits);
+
+      String wifiStatus = (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "OFFLINE";
+      updateOLED(protocolStr, hexStr, results.bits, wifiStatus);
+
+      // Trigger LED blink feedback
+      irBlinkActive = true;
+      irBlinkStart = currentMillis;
+    }
+
+    // Always resume receiver to clear buffer
     irrecv.resume();
   }
 
-  // 4. Manage LED State (IR flash overrides or inverts base clap state)
+  // 2. Non-blocking IR Flash Management
   if (irBlinkActive) {
     if (currentMillis - irBlinkStart < IR_BLINK_DURATION) {
-      // Invert state during the blink pulse so it is visible whether clap LED is ON or OFF
-      digitalWrite(EXTERNAL_LED, ledToggled ? LOW : HIGH);
+      digitalWrite(EXTERNAL_LED, HIGH);
     } else {
       irBlinkActive = false;
-      digitalWrite(EXTERNAL_LED, ledToggled ? HIGH : LOW);
+      digitalWrite(EXTERNAL_LED, LOW);
     }
-  } else {
-    digitalWrite(EXTERNAL_LED, ledToggled ? HIGH : LOW);
   }
 
-  // 5. OLED Display Refresh (~25 FPS)
-  if (currentMillis - lastDisplayUpdate >= 40) {
-    lastDisplayUpdate = currentMillis;
+  // 3. Wi-Fi Reconnect Watchdog (every 5 seconds)
+  if (currentMillis - lastWifiCheck >= 5000) {
+    lastWifiCheck = currentMillis;
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.reconnect();
+    }
+  }
 
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
+  // 4. Idle Heartbeat Blink (only when IR flash is not active)
+  if (!irBlinkActive) {
+    bool isConnected = (WiFi.status() == WL_CONNECTED);
+    unsigned long blinkInterval = isConnected ? 1000 : 150;
 
-    // Wi-Fi Status Banner
-    display.setCursor(0, 0);
-    display.printf("WiFi: %s", (WiFi.status() == WL_CONNECTED) ? "ONLINE" : "SEARCH");
-
-    // IR Code
-    display.setCursor(0, 14);
-    display.printf("IR  : %s", lastIRCode.c_str());
-
-    // Sound Stats
-    display.setCursor(0, 26);
-    display.printf("Raw A0 : %d", audioSample);
-    display.setCursor(0, 38);
-    display.printf("LED (Clap): %s", ledToggled ? "ON" : "OFF");
-
-    // Live Audio VU Bar
-    display.drawRect(0, 50, 124, 12, SSD1306_WHITE);
-    display.fillRect(2, 52, soundBarWidth, 8, SSD1306_WHITE);
-
-    display.display();
+    if (currentMillis - previousMillis >= blinkInterval) {
+      previousMillis = currentMillis;
+      ledState = !ledState;
+      digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
+    }
   }
 }
