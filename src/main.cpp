@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <EEPROM.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -23,9 +25,18 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BUTTON_PIN   D5  // Mode switch button (Active LOW)
 #define EXTERNAL_LED D1  // Visual indicator LED
 
-// Wi-Fi Credentials for RF Tripwire
-const char* target_ssid     = "Airfiber-3rdFloorBachelor";
-const char* target_password = "Airfiber-3rdfloor";
+// AP Configuration Portal Credentials
+const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
+const char* AP_CONFIG_PASS = "12345678";
+
+// EEPROM Storage Settings
+#define EEPROM_SIZE 96
+#define EEPROM_MAGIC 0x5A
+char target_ssid[33]     = "";
+char target_password[65] = "";
+
+// Web Server Instance on Port 80
+ESP8266WebServer server(80);
 
 // IR Configuration
 const uint16_t kCaptureBufferSize = 1024;
@@ -114,22 +125,52 @@ float dynamicThreshold = 2.4;
 int waveBuffer[WAVE_POINTS];
 int waveIndex = 0;
 
-// 4 Operational Modes
+// Operational Modes
 enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
   MODE_RF_TRIPWIRE = 2,
-  MODE_IR_DECODER = 3
+  MODE_IR_DECODER = 3,
+  MODE_AP_CONFIG = 4
 };
 
 DeviceMode currentMode = MODE_RADAR;
 
-// Non-blocking Button & LED Timing
+// Non-blocking Button Timing & Long Press Detection
 unsigned long lastButtonCheck = 0;
 bool lastButtonReading = HIGH;
+unsigned long buttonPressStartTime = 0;
+bool longPressTriggered = false;
+
 bool irBlinkActive = false;
 unsigned long irBlinkStart = 0;
 const unsigned long IR_BLINK_DURATION = 80;
+
+void loadCredentials() {
+  EEPROM.begin(EEPROM_SIZE);
+  if (EEPROM.read(0) == EEPROM_MAGIC) {
+    for (int i = 0; i < 32; i++) target_ssid[i] = EEPROM.read(1 + i);
+    target_ssid[32] = '\0';
+    for (int i = 0; i < 64; i++) target_password[i] = EEPROM.read(33 + i);
+    target_password[64] = '\0';
+  } else {
+    strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
+    strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
+  }
+}
+
+void saveCredentials(const String& newSSID, const String& newPass) {
+  EEPROM.write(0, EEPROM_MAGIC);
+  for (int i = 0; i < 32; i++) {
+    EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
+  }
+  for (int i = 0; i < 64; i++) {
+    EEPROM.write(33 + i, i < (int)newPass.length() ? newPass[i] : 0);
+  }
+  EEPROM.commit();
+  newSSID.toCharArray(target_ssid, sizeof(target_ssid));
+  newPass.toCharArray(target_password, sizeof(target_password));
+}
 
 void registerTarget(uint8_t* mac, int rssi) {
   int targetIndex = -1;
@@ -185,11 +226,56 @@ void triggerWifiScan() {
   });
 }
 
+void handleRoot() {
+  int n = WiFi.scanNetworks();
+  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>body{font-family:Arial,sans-serif;background:#121212;color:#eee;text-align:center;padding:20px;}";
+  html += "form{background:#1f1f1f;padding:20px;border-radius:10px;display:inline-block;max-width:320px;width:100%;box-shadow:0 0 10px rgba(0,0,0,0.5);}";
+  html += "select,input{width:90%;padding:10px;margin:10px 0;border-radius:5px;border:none;background:#2a2a2a;color:#fff;}";
+  html += "input[type=submit]{background:#00bcd4;color:#fff;font-weight:bold;cursor:pointer;}";
+  html += "</style></head><body>";
+  html += "<h2>AP Configuration</h2>";
+  html += "<form method='POST' action='/save'>";
+  html += "<label>Select Nearby Wi-Fi:</label><br><select name='ssid'>";
+
+  for (int i = 0; i < n; ++i) {
+    String s = WiFi.SSID(i);
+    s.trim();
+    if (s.length() > 0) {
+      html += "<option value='" + s + "'>" + s + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+    }
+  }
+
+  html += "</select><br>";
+  html += "<label>Wi-Fi Password:</label><br><input type='password' name='pass' placeholder='Enter Password'><br>";
+  html += "<input type='submit' value='Save & Connect'>";
+  html += "</form></body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleSave() {
+  String reqSSID = server.arg("ssid");
+  String reqPass = server.arg("pass");
+
+  if (reqSSID.length() > 0) {
+    saveCredentials(reqSSID, reqPass);
+    String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
+    html += "<h2>Credentials Saved!</h2><p>Rebooting into Tripwire Mode...</p></body></html>";
+    server.send(200, "text/html", html);
+    delay(1500);
+    ESP.restart();
+  } else {
+    server.send(400, "text/plain", "SSID cannot be empty.");
+  }
+}
+
 void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
 
   // Reset Subsystems
+  server.stop();
   wifi_promiscuous_enable(0);
   irrecv.disableIRIn();
   digitalWrite(EXTERNAL_LED, LOW);
@@ -203,7 +289,7 @@ void configureMode(DeviceMode newMode) {
       wifi_promiscuous_enable(0);
       wifi_set_promiscuous_rx_cb(snifferCallback);
       wifi_promiscuous_enable(1);
-      Serial.println(F("\n[MODE 1/4] 2.4 GHz Wi-Fi Radar Scope"));
+      Serial.println(F("\n[MODE 1/5] 2.4 GHz Wi-Fi Radar Scope"));
       break;
 
     case MODE_SCANNER:
@@ -212,7 +298,7 @@ void configureMode(DeviceMode newMode) {
       totalNetworksFound = 0;
       triggerWifiScan();
       lastScanTime = millis();
-      Serial.println(F("\n[MODE 2/4] Wi-Fi AP Scanner"));
+      Serial.println(F("\n[MODE 2/5] Wi-Fi AP Scanner"));
       break;
 
     case MODE_RF_TRIPWIRE:
@@ -224,7 +310,7 @@ void configureMode(DeviceMode newMode) {
       calibrationStartTime = 0;
       maxNoiseObserved = 0.0;
       for (int i = 0; i < WAVE_POINTS; i++) waveBuffer[i] = 42;
-      Serial.println(F("\n[MODE 3/4] Device-Free RF Motion Tripwire"));
+      Serial.println(F("\n[MODE 3/5] Device-Free RF Motion Tripwire"));
       break;
 
     case MODE_IR_DECODER:
@@ -232,7 +318,17 @@ void configureMode(DeviceMode newMode) {
       WiFi.mode(WIFI_OFF);
       irrecv.setUnknownThreshold(12);
       irrecv.enableIRIn();
-      Serial.println(F("\n[MODE 4/4] TSOP IR Remote Decoder"));
+      Serial.println(F("\n[MODE 4/5] TSOP IR Remote Decoder"));
+      break;
+
+    case MODE_AP_CONFIG:
+      WiFi.disconnect();
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.softAP(AP_CONFIG_SSID, AP_CONFIG_PASS);
+      server.on("/", handleRoot);
+      server.on("/save", HTTP_POST, handleSave);
+      server.begin();
+      Serial.println(F("\n[MODE 5/5] Secured AP Web Configuration Portal Started"));
       break;
   }
 }
@@ -386,6 +482,28 @@ void drawDecoderUI() {
   display.display();
 }
 
+void drawConfigUI() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.println("--- AP CONFIG ---");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  display.setCursor(0, 13);
+  display.println("SSID: ESP-Sentinel");
+  display.setCursor(0, 23);
+  display.println("Pass: 12345678");
+
+  display.setCursor(0, 38);
+  display.println("Open in Browser:");
+  display.setCursor(0, 48);
+  display.println("http://192.168.4.1");
+
+  display.display();
+}
+
 void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -394,6 +512,8 @@ void setup() {
 
   Serial.begin(115200);
   delay(100);
+
+  loadCredentials();
 
   // Initialize OLED (180-degree inverted view)
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -409,18 +529,29 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Debounced Push Button Mode Cycler (D5)
-  if (currentMillis - lastButtonCheck >= 50) {
+  // 1. Dual-Action Button Handler (Short-press cycles modes; Hold >= 2s opens AP config)
+  if (currentMillis - lastButtonCheck >= 40) {
     lastButtonCheck = currentMillis;
     bool reading = digitalRead(BUTTON_PIN);
-    if (reading == LOW && lastButtonReading == HIGH) {
-      DeviceMode nextMode;
-      if (currentMode == MODE_RADAR)             nextMode = MODE_SCANNER;
-      else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
-      else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
-      else                                      nextMode = MODE_RADAR;
 
-      configureMode(nextMode);
+    if (reading == LOW && lastButtonReading == HIGH) {
+      buttonPressStartTime = currentMillis;
+      longPressTriggered = false;
+    } else if (reading == LOW && !longPressTriggered) {
+      if (currentMillis - buttonPressStartTime >= 2000) {
+        longPressTriggered = true;
+        configureMode(MODE_AP_CONFIG);
+      }
+    } else if (reading == HIGH && lastButtonReading == LOW) {
+      if (!longPressTriggered) {
+        DeviceMode nextMode;
+        if (currentMode == MODE_RADAR)             nextMode = MODE_SCANNER;
+        else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
+        else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
+        else                                      nextMode = MODE_RADAR;
+
+        configureMode(nextMode);
+      }
     }
     lastButtonReading = reading;
   }
@@ -465,14 +596,17 @@ void loop() {
           display.clearDisplay();
           display.setTextColor(SSD1306_WHITE);
           display.setTextSize(1);
-          display.setCursor(0, 24);
-          display.println("Connecting to AP...");
+          display.setCursor(0, 16);
+          display.println("Connecting to AP:");
+          display.setCursor(0, 30);
+          display.println(target_ssid[0] ? target_ssid : "[None Set]");
+          display.setCursor(0, 48);
+          display.println("Hold D5 for Setup");
           display.display();
         }
         break;
       }
 
-      // Start 5-second calibration immediately after Wi-Fi association
       if (!baselineInitialized) {
         baselineRSSI = (float)WiFi.RSSI();
         baselineInitialized = true;
@@ -497,14 +631,12 @@ void loop() {
 
           unsigned long elapsed = currentMillis - calibrationStartTime;
           if (elapsed >= 5000) {
-            // Set dynamic threshold safely above recorded ambient noise peak
             dynamicThreshold = maxNoiseObserved + 1.0;
             if (dynamicThreshold < 2.0) dynamicThreshold = 2.0;
             isCalibrating = false;
             Serial.printf("\n[CALIB DONE] Peak Noise: %.2fdB | Auto TH: %.2fdB\n", maxNoiseObserved, dynamicThreshold);
           }
 
-          // Render live progress screen during calibration
           display.clearDisplay();
           display.setTextColor(SSD1306_WHITE);
           display.setTextSize(1);
@@ -571,6 +703,16 @@ void loop() {
       if (currentMillis - lastDisplayDraw >= 100) {
         lastDisplayDraw = currentMillis;
         drawDecoderUI();
+      }
+      break;
+    }
+
+    case MODE_AP_CONFIG: {
+      server.handleClient();
+
+      if (currentMillis - lastDisplayDraw >= 300) {
+        lastDisplayDraw = currentMillis;
+        drawConfigUI();
       }
       break;
     }
