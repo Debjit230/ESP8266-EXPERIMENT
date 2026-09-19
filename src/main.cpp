@@ -23,6 +23,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BUTTON_PIN   D5  // Mode switch button (Active LOW)
 #define EXTERNAL_LED D1  // Visual indicator LED
 
+// Wi-Fi Credentials for RF Tripwire
+const char* target_ssid     = "Airfiber-3rdFloorBachelor";
+const char* target_password = "Airfiber-3rdfloor";
+
 // IR Configuration
 const uint16_t kCaptureBufferSize = 1024;
 const uint8_t kTimeout = 50;
@@ -90,11 +94,27 @@ unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 5000;
 bool scanningInProgress = false;
 
-// 3 Operating Modes
+// Device-Free RF Tripwire Motion Sensing
+const unsigned long SAMPLE_RATE_MS = 50;
+const float EMA_ALPHA = 0.08;
+const float MOTION_THRESHOLD = 2.4;
+
+float baselineRSSI = 0.0;
+bool baselineInitialized = false;
+unsigned long lastSampleTime = 0;
+unsigned long lastMotionDetected = 0;
+const unsigned long ALARM_HOLD_TIME = 1500;
+
+#define WAVE_POINTS 128
+int waveBuffer[WAVE_POINTS];
+int waveIndex = 0;
+
+// 4 Operating Modes
 enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
-  MODE_IR_DECODER = 2
+  MODE_RF_TRIPWIRE = 2,
+  MODE_IR_DECODER = 3
 };
 
 DeviceMode currentMode = MODE_RADAR;
@@ -146,13 +166,12 @@ void snifferCallback(uint8_t *buf, uint16_t len) {
   struct SnifferPacket *sniffer = (struct SnifferPacket*) buf;
   int rssi = sniffer->rx_ctrl.rssi;
 
-  if (sniffer->buf[0] == 0x40) { // Probe Request packet
+  if (sniffer->buf[0] == 0x40) {
     uint8_t *srcMac = &sniffer->buf[10];
     registerTarget(srcMac, rssi);
   }
 }
 
-// Background scan without clearing the OLED buffer
 void triggerWifiScan() {
   scanningInProgress = true;
   WiFi.scanNetworksAsync([](int networksFound) {
@@ -170,30 +189,43 @@ void configureMode(DeviceMode newMode) {
   irrecv.disableIRIn();
   digitalWrite(EXTERNAL_LED, LOW);
 
-  if (currentMode == MODE_RADAR) {
-    WiFi.persistent(false);
-    WiFi.disconnect();
-    WiFi.mode(WIFI_STA);
-    wifi_set_opmode(STATION_MODE);
-    wifi_promiscuous_enable(0);
-    wifi_set_promiscuous_rx_cb(snifferCallback);
-    wifi_promiscuous_enable(1);
-    Serial.println(F("\n[MODE] 1/3: 2.4 GHz Wi-Fi Radar"));
+  switch (currentMode) {
+    case MODE_RADAR:
+      WiFi.persistent(false);
+      WiFi.disconnect();
+      WiFi.mode(WIFI_STA);
+      wifi_set_opmode(STATION_MODE);
+      wifi_promiscuous_enable(0);
+      wifi_set_promiscuous_rx_cb(snifferCallback);
+      wifi_promiscuous_enable(1);
+      Serial.println(F("\n[MODE 1/4] 2.4 GHz Wi-Fi Radar Scope"));
+      break;
 
-  } else if (currentMode == MODE_SCANNER) {
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    totalNetworksFound = 0;
-    triggerWifiScan();
-    lastScanTime = millis();
-    Serial.println(F("\n[MODE] 2/3: Wi-Fi Network Scanner"));
+    case MODE_SCANNER:
+      WiFi.mode(WIFI_STA);
+      WiFi.disconnect();
+      totalNetworksFound = 0;
+      triggerWifiScan();
+      lastScanTime = millis();
+      Serial.println(F("\n[MODE 2/4] Wi-Fi AP Scanner"));
+      break;
 
-  } else if (currentMode == MODE_IR_DECODER) {
-    WiFi.disconnect();
-    WiFi.mode(WIFI_OFF);
-    irrecv.setUnknownThreshold(12);
-    irrecv.enableIRIn();
-    Serial.println(F("\n[MODE] 3/3: TSOP IR Remote Decoder"));
+    case MODE_RF_TRIPWIRE:
+      WiFi.mode(WIFI_STA);
+      WiFi.setSleepMode(WIFI_NONE_SLEEP);
+      WiFi.begin(target_ssid, target_password);
+      baselineInitialized = false;
+      for (int i = 0; i < WAVE_POINTS; i++) waveBuffer[i] = 42;
+      Serial.println(F("\n[MODE 3/4] Device-Free RF Motion Tripwire"));
+      break;
+
+    case MODE_IR_DECODER:
+      WiFi.disconnect();
+      WiFi.mode(WIFI_OFF);
+      irrecv.setUnknownThreshold(12);
+      irrecv.enableIRIn();
+      Serial.println(F("\n[MODE 4/4] TSOP IR Remote Decoder"));
+      break;
   }
 }
 
@@ -204,14 +236,12 @@ void drawRadarUI() {
   const int centerY = 32;
   const int maxRadius = 30;
 
-  // Draw scope rings & crosshairs
   display.drawCircle(centerX, centerY, 10, SSD1306_WHITE);
   display.drawCircle(centerX, centerY, 20, SSD1306_WHITE);
   display.drawCircle(centerX, centerY, maxRadius, SSD1306_WHITE);
   display.drawLine(centerX - maxRadius, centerY, centerX + maxRadius, centerY, SSD1306_WHITE);
   display.drawLine(centerX, centerY - maxRadius, centerX, centerY + maxRadius, SSD1306_WHITE);
 
-  // Rotating sweep beam
   int sweepX = centerX + cos(sweepAngle) * maxRadius;
   int sweepY = centerY + sin(sweepAngle) * maxRadius;
   display.drawLine(centerX, centerY, sweepX, sweepY, SSD1306_WHITE);
@@ -239,7 +269,6 @@ void drawRadarUI() {
     }
   }
 
-  // Info sidebar
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(76, 4);
@@ -263,7 +292,6 @@ void drawScannerUI() {
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
-  // Header
   display.setCursor(0, 0);
   display.printf("NETWORKS FOUND: %d", totalNetworksFound);
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
@@ -271,19 +299,11 @@ void drawScannerUI() {
   int yPos = 12;
   int displayedCount = 0;
 
-  // Filter out hidden/blank networks and display up to 4 visible APs
   for (int i = 0; i < totalNetworksFound && displayedCount < 4; i++) {
     String ssidName = WiFi.SSID(i);
     ssidName.trim();
-
-    // Skip empty, null, or hidden SSIDs
-    if (ssidName.length() == 0) {
-      continue;
-    }
-
-    if (ssidName.length() > 11) {
-      ssidName = ssidName.substring(0, 11);
-    }
+    if (ssidName.length() == 0) continue;
+    if (ssidName.length() > 11) ssidName = ssidName.substring(0, 11);
 
     display.setCursor(0, yPos);
     display.printf("%-11s %2ddB", ssidName.c_str(), WiFi.RSSI(i));
@@ -296,9 +316,39 @@ void drawScannerUI() {
     display.println(scanningInProgress ? "Scanning..." : "No visible APs");
   }
 
-  // Bottom line status indicator
   display.setCursor(0, 56);
   display.print(scanningInProgress ? "Status: Scanning..." : "Status: Active");
+
+  display.display();
+}
+
+void drawTripwireUI(float delta, int currentRssi, bool motionAlert) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.printf("TRIPWIRE: %2ddBm", currentRssi);
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  if (motionAlert) {
+    display.fillRect(0, 11, 128, 10, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(18, 12);
+    display.print("** MOTION ALERT **");
+    display.setTextColor(SSD1306_WHITE);
+  } else {
+    display.setCursor(0, 12);
+    display.printf("Delta: +/-%.1fdB", delta);
+  }
+
+  display.drawFastHLine(0, 42, 128, SSD1306_WHITE);
+
+  for (int x = 0; x < WAVE_POINTS - 1; x++) {
+    int idx1 = (waveIndex + x) % WAVE_POINTS;
+    int idx2 = (waveIndex + x + 1) % WAVE_POINTS;
+    display.drawLine(x, waveBuffer[idx1], x + 1, waveBuffer[idx2], SSD1306_WHITE);
+  }
 
   display.display();
 }
@@ -335,41 +385,39 @@ void setup() {
   digitalWrite(EXTERNAL_LED, LOW);
 
   Serial.begin(115200);
-  delay(200);
+  delay(100);
 
-  // Initialize OLED with 180-degree rotation
+  // Initialize OLED (180-degree inverted view)
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.setRotation(2);
   display.clearDisplay();
   display.display();
 
-  // Boot into default mode (Radar)
+  // Boot into default mode (Wi-Fi Radar Scope)
   configureMode(MODE_RADAR);
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Debounced Push Button Mode Switcher (Cycles: Radar -> Scanner -> IR -> Radar)
+  // 1. Debounced Push Button Mode Cycler (D5)
   if (currentMillis - lastButtonCheck >= 50) {
     lastButtonCheck = currentMillis;
     bool reading = digitalRead(BUTTON_PIN);
     if (reading == LOW && lastButtonReading == HIGH) {
       DeviceMode nextMode;
-      if (currentMode == MODE_RADAR) {
-        nextMode = MODE_SCANNER;
-      } else if (currentMode == MODE_SCANNER) {
-        nextMode = MODE_IR_DECODER;
-      } else {
-        nextMode = MODE_RADAR;
-      }
+      if (currentMode == MODE_RADAR)             nextMode = MODE_SCANNER;
+      else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
+      else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
+      else                                      nextMode = MODE_RADAR;
+
       configureMode(nextMode);
     }
     lastButtonReading = reading;
   }
 
-  // 2. Mode Execution
+  // 2. Active Mode Execution
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
@@ -390,16 +438,60 @@ void loop() {
     }
 
     case MODE_SCANNER: {
-      // Trigger background scan every 5 seconds
       if (!scanningInProgress && (currentMillis - lastScanTime >= SCAN_INTERVAL)) {
         lastScanTime = currentMillis;
         triggerWifiScan();
       }
 
-      // Smooth render interval (no blank flicker screens)
       if (currentMillis - lastDisplayDraw >= 200) {
         lastDisplayDraw = currentMillis;
         drawScannerUI();
+      }
+      break;
+    }
+
+    case MODE_RF_TRIPWIRE: {
+      if (WiFi.status() != WL_CONNECTED) {
+        if (currentMillis - lastDisplayDraw >= 300) {
+          lastDisplayDraw = currentMillis;
+          display.clearDisplay();
+          display.setCursor(0, 24);
+          display.println("Connecting to AP...");
+          display.display();
+        }
+        break;
+      }
+
+      if (currentMillis - lastSampleTime >= SAMPLE_RATE_MS) {
+        lastSampleTime = currentMillis;
+        int currentRssi = WiFi.RSSI();
+
+        if (!baselineInitialized) {
+          baselineRSSI = (float)currentRssi;
+          baselineInitialized = true;
+          break;
+        }
+
+        baselineRSSI = (EMA_ALPHA * (float)currentRssi) + ((1.0 - EMA_ALPHA) * baselineRSSI);
+        float delta = abs((float)currentRssi - baselineRSSI);
+
+        if (delta >= MOTION_THRESHOLD) {
+          lastMotionDetected = currentMillis;
+          digitalWrite(EXTERNAL_LED, HIGH);
+        }
+
+        bool isMotionActive = (currentMillis - lastMotionDetected < ALARM_HOLD_TIME);
+        if (!isMotionActive) {
+          digitalWrite(EXTERNAL_LED, LOW);
+        }
+
+        int yVal = 42 - (int)(((float)currentRssi - baselineRSSI) * 3.5);
+        yVal = constrain(yVal, 22, 62);
+
+        waveBuffer[waveIndex] = yVal;
+        waveIndex = (waveIndex + 1) % WAVE_POINTS;
+
+        drawTripwireUI(delta, currentRssi, isMotionActive);
       }
       break;
     }
