@@ -94,10 +94,9 @@ unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 5000;
 bool scanningInProgress = false;
 
-// Device-Free RF Tripwire Motion Sensing
+// Device-Free RF Tripwire Adaptive Motion Sensing
 const unsigned long SAMPLE_RATE_MS = 50;
 const float EMA_ALPHA = 0.08;
-const float MOTION_THRESHOLD = 2.4;
 
 float baselineRSSI = 0.0;
 bool baselineInitialized = false;
@@ -105,11 +104,17 @@ unsigned long lastSampleTime = 0;
 unsigned long lastMotionDetected = 0;
 const unsigned long ALARM_HOLD_TIME = 1500;
 
+// Auto-Calibration Parameters
+bool isCalibrating = false;
+unsigned long calibrationStartTime = 0;
+float maxNoiseObserved = 0.0;
+float dynamicThreshold = 2.4;
+
 #define WAVE_POINTS 128
 int waveBuffer[WAVE_POINTS];
 int waveIndex = 0;
 
-// 4 Operating Modes
+// 4 Operational Modes
 enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
@@ -215,6 +220,9 @@ void configureMode(DeviceMode newMode) {
       WiFi.setSleepMode(WIFI_NONE_SLEEP);
       WiFi.begin(target_ssid, target_password);
       baselineInitialized = false;
+      isCalibrating = false;
+      calibrationStartTime = 0;
+      maxNoiseObserved = 0.0;
       for (int i = 0; i < WAVE_POINTS; i++) waveBuffer[i] = 42;
       Serial.println(F("\n[MODE 3/4] Device-Free RF Motion Tripwire"));
       break;
@@ -339,7 +347,7 @@ void drawTripwireUI(float delta, int currentRssi, bool motionAlert) {
     display.setTextColor(SSD1306_WHITE);
   } else {
     display.setCursor(0, 12);
-    display.printf("Delta: +/-%.1fdB", delta);
+    display.printf("D:%.1f TH:%.1f", delta, dynamicThreshold);
   }
 
   display.drawFastHLine(0, 42, 128, SSD1306_WHITE);
@@ -455,6 +463,8 @@ void loop() {
         if (currentMillis - lastDisplayDraw >= 300) {
           lastDisplayDraw = currentMillis;
           display.clearDisplay();
+          display.setTextColor(SSD1306_WHITE);
+          display.setTextSize(1);
           display.setCursor(0, 24);
           display.println("Connecting to AP...");
           display.display();
@@ -462,20 +472,56 @@ void loop() {
         break;
       }
 
+      // Start 5-second calibration immediately after Wi-Fi association
+      if (!baselineInitialized) {
+        baselineRSSI = (float)WiFi.RSSI();
+        baselineInitialized = true;
+        isCalibrating = true;
+        calibrationStartTime = currentMillis;
+        maxNoiseObserved = 0.0;
+        break;
+      }
+
       if (currentMillis - lastSampleTime >= SAMPLE_RATE_MS) {
         lastSampleTime = currentMillis;
         int currentRssi = WiFi.RSSI();
 
-        if (!baselineInitialized) {
-          baselineRSSI = (float)currentRssi;
-          baselineInitialized = true;
-          break;
-        }
-
         baselineRSSI = (EMA_ALPHA * (float)currentRssi) + ((1.0 - EMA_ALPHA) * baselineRSSI);
         float delta = abs((float)currentRssi - baselineRSSI);
 
-        if (delta >= MOTION_THRESHOLD) {
+        // Phase 1: 5-Second Noise Floor Calibration Window
+        if (isCalibrating) {
+          if (delta > maxNoiseObserved) {
+            maxNoiseObserved = delta;
+          }
+
+          unsigned long elapsed = currentMillis - calibrationStartTime;
+          if (elapsed >= 5000) {
+            // Set dynamic threshold safely above recorded ambient noise peak
+            dynamicThreshold = maxNoiseObserved + 1.0;
+            if (dynamicThreshold < 2.0) dynamicThreshold = 2.0;
+            isCalibrating = false;
+            Serial.printf("\n[CALIB DONE] Peak Noise: %.2fdB | Auto TH: %.2fdB\n", maxNoiseObserved, dynamicThreshold);
+          }
+
+          // Render live progress screen during calibration
+          display.clearDisplay();
+          display.setTextColor(SSD1306_WHITE);
+          display.setTextSize(1);
+          display.setCursor(0, 8);
+          display.println("CALIBRATING ROOM...");
+          display.setCursor(0, 24);
+          display.printf("Remain: %lus", (5000 - elapsed) / 1000 + 1);
+          display.setCursor(0, 38);
+          display.printf("Noise : %.1fdB", maxNoiseObserved);
+          display.setCursor(0, 50);
+          display.println("Keep area clear!");
+          display.display();
+          break;
+        }
+
+        // Phase 2: Active Motion Tripwire Detection
+        if (delta >= dynamicThreshold) {
           lastMotionDetected = currentMillis;
           digitalWrite(EXTERNAL_LED, HIGH);
         }
