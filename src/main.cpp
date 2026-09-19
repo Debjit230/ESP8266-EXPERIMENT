@@ -84,15 +84,22 @@ struct SnifferPacket {
   uint16_t len;
 };
 
-// Mode Management (0: Wi-Fi Radar, 1: IR Decoder)
+// Wi-Fi AP Scanner Storage
+int totalNetworksFound = 0;
+unsigned long lastScanTime = 0;
+const unsigned long SCAN_INTERVAL = 5000;
+bool scanningInProgress = false;
+
+// 3 Operating Modes
 enum DeviceMode {
   MODE_RADAR = 0,
-  MODE_IR_DECODER = 1
+  MODE_SCANNER = 1,
+  MODE_IR_DECODER = 2
 };
 
 DeviceMode currentMode = MODE_RADAR;
 
-// Non-blocking button & LED variables
+// Non-blocking Button & LED Timing
 unsigned long lastButtonCheck = 0;
 bool lastButtonReading = HIGH;
 bool irBlinkActive = false;
@@ -139,19 +146,39 @@ void snifferCallback(uint8_t *buf, uint16_t len) {
   struct SnifferPacket *sniffer = (struct SnifferPacket*) buf;
   int rssi = sniffer->rx_ctrl.rssi;
 
-  if (sniffer->buf[0] == 0x40) { // Probe Request frame
+  if (sniffer->buf[0] == 0x40) { // Probe Request packet
     uint8_t *srcMac = &sniffer->buf[10];
     registerTarget(srcMac, rssi);
   }
+}
+
+void triggerWifiScan() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("--- WI-FI SCANNER ---");
+  display.setCursor(0, 24);
+  display.println("Scanning 2.4GHz APs...");
+  display.display();
+
+  WiFi.scanNetworksAsync([](int networksFound) {
+    totalNetworksFound = networksFound;
+    scanningInProgress = false;
+  });
+  scanningInProgress = true;
 }
 
 void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
 
+  // Reset Subsystems
+  wifi_promiscuous_enable(0);
+  irrecv.disableIRIn();
+  digitalWrite(EXTERNAL_LED, LOW);
+
   if (currentMode == MODE_RADAR) {
-    irrecv.disableIRIn();
-    
     WiFi.persistent(false);
     WiFi.disconnect();
     WiFi.mode(WIFI_STA);
@@ -159,17 +186,22 @@ void configureMode(DeviceMode newMode) {
     wifi_promiscuous_enable(0);
     wifi_set_promiscuous_rx_cb(snifferCallback);
     wifi_promiscuous_enable(1);
-    
-    Serial.println("\n[MODE] Switched to 2.4 GHz Wi-Fi Radar");
-  } else {
-    wifi_promiscuous_enable(0);
+    Serial.println(F("\n[MODE] 1/3: 2.4 GHz Wi-Fi Radar"));
+
+  } else if (currentMode == MODE_SCANNER) {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    totalNetworksFound = 0;
+    triggerWifiScan();
+    lastScanTime = millis();
+    Serial.println(F("\n[MODE] 2/3: Wi-Fi Network Scanner"));
+
+  } else if (currentMode == MODE_IR_DECODER) {
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
-
     irrecv.setUnknownThreshold(12);
     irrecv.enableIRIn();
-    
-    Serial.println("\n[MODE] Switched to TSOP IR Decoder");
+    Serial.println(F("\n[MODE] 3/3: TSOP IR Remote Decoder"));
   }
 }
 
@@ -180,7 +212,7 @@ void drawRadarUI() {
   const int centerY = 32;
   const int maxRadius = 30;
 
-  // Radar scope rings & crosshairs
+  // Draw scope rings & crosshairs
   display.drawCircle(centerX, centerY, 10, SSD1306_WHITE);
   display.drawCircle(centerX, centerY, 20, SSD1306_WHITE);
   display.drawCircle(centerX, centerY, maxRadius, SSD1306_WHITE);
@@ -215,7 +247,7 @@ void drawRadarUI() {
     }
   }
 
-  // Sidebar readout
+  // Info sidebar
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(76, 4);
@@ -234,11 +266,47 @@ void drawRadarUI() {
   display.display();
 }
 
+void drawScannerUI() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  // Header
+  display.setCursor(0, 0);
+  display.printf("NETWORKS FOUND: %d", totalNetworksFound);
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  // Display top 4 visible APs
+  int yPos = 12;
+  int showLimit = min(totalNetworksFound, 4);
+
+  for (int i = 0; i < showLimit; i++) {
+    display.setCursor(0, yPos);
+    String ssidName = WiFi.SSID(i);
+    if (ssidName.length() > 11) ssidName = ssidName.substring(0, 11);
+    if (ssidName.length() == 0) ssidName = "[Hidden]";
+
+    display.printf("%-11s %2ddB", ssidName.c_str(), WiFi.RSSI(i));
+    yPos += 11;
+  }
+
+  if (totalNetworksFound == 0 && !scanningInProgress) {
+    display.setCursor(0, 24);
+    display.println("No APs in range");
+  }
+
+  // Footer status
+  display.setCursor(0, 56);
+  display.print(scanningInProgress ? "Status: Scanning..." : "Status: Auto-Refresh");
+
+  display.display();
+}
+
 void drawDecoderUI() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-
   display.setTextSize(1);
+
   display.setCursor(0, 0);
   display.println("--- IR DECODER ---");
 
@@ -254,7 +322,7 @@ void drawDecoderUI() {
   display.printf("Bits : %d-bit\n", lastBits);
 
   display.setCursor(0, 54);
-  display.print("TSOP Receiver: Active");
+  display.print("TSOP Receiver: Ready");
 
   display.display();
 }
@@ -268,13 +336,10 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // Initialize OLED on D3 & D4
+  // Initialize OLED with 180° rotation
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-
-  // 180-degree display rotation (flips to the opposite orientation)
   display.setRotation(2);
-
   display.clearDisplay();
   display.display();
 
@@ -285,68 +350,94 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Debounced Mode Button Handler (D5)
+  // 1. Debounced Push Button Mode Switcher (Cycles: Radar -> Scanner -> IR -> Radar)
   if (currentMillis - lastButtonCheck >= 50) {
     lastButtonCheck = currentMillis;
     bool reading = digitalRead(BUTTON_PIN);
     if (reading == LOW && lastButtonReading == HIGH) {
-      DeviceMode nextMode = (currentMode == MODE_RADAR) ? MODE_IR_DECODER : MODE_RADAR;
+      DeviceMode nextMode;
+      if (currentMode == MODE_RADAR) {
+        nextMode = MODE_SCANNER;
+      } else if (currentMode == MODE_SCANNER) {
+        nextMode = MODE_IR_DECODER;
+      } else {
+        nextMode = MODE_RADAR;
+      }
       configureMode(nextMode);
     }
     lastButtonReading = reading;
   }
 
-  // 2. Mode-Specific Execution
-  if (currentMode == MODE_RADAR) {
-    // Channel hopping every 180 ms
-    if (currentMillis - lastChannelHop >= 180) {
-      lastChannelHop = currentMillis;
-      currentChannel++;
-      if (currentChannel > 13) currentChannel = 1;
-      wifi_set_channel(currentChannel);
-    }
-
-    // Refresh Radar Scope (~20 FPS)
-    if (currentMillis - lastDisplayDraw >= 50) {
-      lastDisplayDraw = currentMillis;
-      sweepAngle += 0.15;
-      if (sweepAngle >= 2 * PI) sweepAngle = 0;
-      drawRadarUI();
-      digitalWrite(EXTERNAL_LED, LOW);
-    }
-
-  } else {
-    // IR Decoder Mode
-    if (irrecv.decode(&irResults)) {
-      bool isValidSignal = (irResults.decode_type != decode_type_t::UNKNOWN) &&
-                           (irResults.bits >= 8) &&
-                           (irResults.value != 0);
-
-      if (isValidSignal) {
-        lastProtocol = typeToString(irResults.decode_type);
-        lastHexCode  = "0x" + uint64ToString(irResults.value, HEX);
-        lastBits     = irResults.bits;
-
-        Serial.printf("\n[IR] %s | Code: %s | %d bits\n",
-                      lastProtocol.c_str(), lastHexCode.c_str(), lastBits);
-
-        irBlinkActive = true;
-        irBlinkStart  = currentMillis;
-        digitalWrite(EXTERNAL_LED, HIGH);
+  // 2. Execution per Active Mode
+  switch (currentMode) {
+    case MODE_RADAR: {
+      // Channel Hopping
+      if (currentMillis - lastChannelHop >= 180) {
+        lastChannelHop = currentMillis;
+        currentChannel++;
+        if (currentChannel > 13) currentChannel = 1;
+        wifi_set_channel(currentChannel);
       }
-      irrecv.resume();
+
+      // Draw Scope (~20 FPS)
+      if (currentMillis - lastDisplayDraw >= 50) {
+        lastDisplayDraw = currentMillis;
+        sweepAngle += 0.15;
+        if (sweepAngle >= 2 * PI) sweepAngle = 0;
+        drawRadarUI();
+        digitalWrite(EXTERNAL_LED, LOW);
+      }
+      break;
     }
 
-    // Manage non-blocking IR indicator pulse
-    if (irBlinkActive && (currentMillis - irBlinkStart >= IR_BLINK_DURATION)) {
-      irBlinkActive = false;
-      digitalWrite(EXTERNAL_LED, LOW);
+    case MODE_SCANNER: {
+      // Auto-scan cycle every 5 seconds asynchronously
+      if (!scanningInProgress && (currentMillis - lastScanTime >= SCAN_INTERVAL)) {
+        lastScanTime = currentMillis;
+        triggerWifiScan();
+      }
+
+      // Render Scanner List (~5 FPS)
+      if (currentMillis - lastDisplayDraw >= 200) {
+        lastDisplayDraw = currentMillis;
+        drawScannerUI();
+      }
+      break;
     }
 
-    // Refresh IR UI (~10 FPS)
-    if (currentMillis - lastDisplayDraw >= 100) {
-      lastDisplayDraw = currentMillis;
-      drawDecoderUI();
+    case MODE_IR_DECODER: {
+      if (irrecv.decode(&irResults)) {
+        bool isValidSignal = (irResults.decode_type != decode_type_t::UNKNOWN) &&
+                             (irResults.bits >= 8) &&
+                             (irResults.value != 0);
+
+        if (isValidSignal) {
+          lastProtocol = typeToString(irResults.decode_type);
+          lastHexCode  = "0x" + uint64ToString(irResults.value, HEX);
+          lastBits     = irResults.bits;
+
+          Serial.printf("[IR] %s | Code: %s | %d bits\n",
+                        lastProtocol.c_str(), lastHexCode.c_str(), lastBits);
+
+          irBlinkActive = true;
+          irBlinkStart  = currentMillis;
+          digitalWrite(EXTERNAL_LED, HIGH);
+        }
+        irrecv.resume();
+      }
+
+      // Non-blocking indicator pulse
+      if (irBlinkActive && (currentMillis - irBlinkStart >= IR_BLINK_DURATION)) {
+        irBlinkActive = false;
+        digitalWrite(EXTERNAL_LED, LOW);
+      }
+
+      // Render IR UI (~10 FPS)
+      if (currentMillis - lastDisplayDraw >= 100) {
+        lastDisplayDraw = currentMillis;
+        drawDecoderUI();
+      }
+      break;
     }
   }
 }
