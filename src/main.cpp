@@ -152,21 +152,13 @@ void snifferCallback(uint8_t *buf, uint16_t len) {
   }
 }
 
+// Background scan without clearing the OLED buffer
 void triggerWifiScan() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("--- WI-FI SCANNER ---");
-  display.setCursor(0, 24);
-  display.println("Scanning 2.4GHz APs...");
-  display.display();
-
+  scanningInProgress = true;
   WiFi.scanNetworksAsync([](int networksFound) {
     totalNetworksFound = networksFound;
     scanningInProgress = false;
   });
-  scanningInProgress = true;
 }
 
 void configureMode(DeviceMode newMode) {
@@ -276,28 +268,37 @@ void drawScannerUI() {
   display.printf("NETWORKS FOUND: %d", totalNetworksFound);
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
-  // Display top 4 visible APs
   int yPos = 12;
-  int showLimit = min(totalNetworksFound, 4);
+  int displayedCount = 0;
 
-  for (int i = 0; i < showLimit; i++) {
-    display.setCursor(0, yPos);
+  // Filter out hidden/blank networks and display up to 4 visible APs
+  for (int i = 0; i < totalNetworksFound && displayedCount < 4; i++) {
     String ssidName = WiFi.SSID(i);
-    if (ssidName.length() > 11) ssidName = ssidName.substring(0, 11);
-    if (ssidName.length() == 0) ssidName = "[Hidden]";
+    ssidName.trim();
 
+    // Skip empty, null, or hidden SSIDs
+    if (ssidName.length() == 0) {
+      continue;
+    }
+
+    if (ssidName.length() > 11) {
+      ssidName = ssidName.substring(0, 11);
+    }
+
+    display.setCursor(0, yPos);
     display.printf("%-11s %2ddB", ssidName.c_str(), WiFi.RSSI(i));
     yPos += 11;
+    displayedCount++;
   }
 
-  if (totalNetworksFound == 0 && !scanningInProgress) {
+  if (displayedCount == 0) {
     display.setCursor(0, 24);
-    display.println("No APs in range");
+    display.println(scanningInProgress ? "Scanning..." : "No visible APs");
   }
 
-  // Footer status
+  // Bottom line status indicator
   display.setCursor(0, 56);
-  display.print(scanningInProgress ? "Status: Scanning..." : "Status: Auto-Refresh");
+  display.print(scanningInProgress ? "Status: Scanning..." : "Status: Active");
 
   display.display();
 }
@@ -336,7 +337,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // Initialize OLED with 180° rotation
+  // Initialize OLED with 180-degree rotation
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.setRotation(2);
@@ -368,10 +369,9 @@ void loop() {
     lastButtonReading = reading;
   }
 
-  // 2. Execution per Active Mode
+  // 2. Mode Execution
   switch (currentMode) {
     case MODE_RADAR: {
-      // Channel Hopping
       if (currentMillis - lastChannelHop >= 180) {
         lastChannelHop = currentMillis;
         currentChannel++;
@@ -379,7 +379,6 @@ void loop() {
         wifi_set_channel(currentChannel);
       }
 
-      // Draw Scope (~20 FPS)
       if (currentMillis - lastDisplayDraw >= 50) {
         lastDisplayDraw = currentMillis;
         sweepAngle += 0.15;
@@ -391,13 +390,13 @@ void loop() {
     }
 
     case MODE_SCANNER: {
-      // Auto-scan cycle every 5 seconds asynchronously
+      // Trigger background scan every 5 seconds
       if (!scanningInProgress && (currentMillis - lastScanTime >= SCAN_INTERVAL)) {
         lastScanTime = currentMillis;
         triggerWifiScan();
       }
 
-      // Render Scanner List (~5 FPS)
+      // Smooth render interval (no blank flicker screens)
       if (currentMillis - lastDisplayDraw >= 200) {
         lastDisplayDraw = currentMillis;
         drawScannerUI();
@@ -426,13 +425,11 @@ void loop() {
         irrecv.resume();
       }
 
-      // Non-blocking indicator pulse
       if (irBlinkActive && (currentMillis - irBlinkStart >= IR_BLINK_DURATION)) {
         irBlinkActive = false;
         digitalWrite(EXTERNAL_LED, LOW);
       }
 
-      // Render IR UI (~10 FPS)
       if (currentMillis - lastDisplayDraw >= 100) {
         lastDisplayDraw = currentMillis;
         drawDecoderUI();
