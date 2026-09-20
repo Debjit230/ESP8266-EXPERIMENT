@@ -43,15 +43,17 @@ const long  gmtOffset_sec     = 19800;
 const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
-// Clock Screen Saver Timing (20 Seconds Inactivity)
-const unsigned long CLOCK_TIMEOUT_MS = 20000;
-unsigned long lastUserActivity = 0;
-bool isClockModeActive = false;
+// Timers & Lock Settings
+const unsigned long CLOCK_TIMEOUT_MS = 20000;   // 20 sec -> Clock screensaver
+const unsigned long AUTO_LOCK_MS     = 60000;   // 60 sec -> EMO face lock screen
+unsigned long lastUserActivity       = 0;
+bool isClockModeActive               = false;
+bool isDeviceLocked                  = false;
 
 // Global Non-Blocking Alert LED Controller
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
-const unsigned long LED_ALERT_DURATION = 120; // 120ms sharp pulse per detection
+const unsigned long LED_ALERT_DURATION = 120;
 
 void triggerLedAlert() {
   alertLedActive = true;
@@ -136,7 +138,6 @@ unsigned long lastSampleTime = 0;
 unsigned long lastMotionDetected = 0;
 const unsigned long ALARM_HOLD_TIME = 1500;
 
-// Auto-Calibration Parameters
 bool isCalibrating = false;
 unsigned long calibrationStartTime = 0;
 float maxNoiseObserved = 0.0;
@@ -156,12 +157,24 @@ enum DeviceMode {
 };
 
 DeviceMode currentMode = MODE_RADAR;
+DeviceMode resumeMode  = MODE_RADAR;
 
-// Robust Long-Press & Short-Press Button Handler
+// Multi-Click & Long-Press Button Engine
 unsigned long lastButtonCheck = 0;
 bool buttonIsPressed = false;
 unsigned long buttonPressStartTime = 0;
 bool holdThresholdMet = false;
+int clickCount = 0;
+unsigned long lastClickTime = 0;
+const unsigned long DOUBLE_CLICK_GAP = 350; // max ms between two fast clicks
+
+// EMO Face Animation State Machine
+unsigned long lastEyeAnim = 0;
+int eyeOffsetX = 0;
+int eyeOffsetY = 0;
+int eyeHeight  = 30;
+bool isBlinking = false;
+unsigned long blinkStartTime = 0;
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -222,7 +235,7 @@ void registerTarget(uint8_t* mac, int rssi) {
 }
 
 void snifferCallback(uint8_t *buf, uint16_t len) {
-  if (currentMode != MODE_RADAR || len == 12) return;
+  if (isDeviceLocked || currentMode != MODE_RADAR || len == 12) return;
 
   struct SnifferPacket *sniffer = (struct SnifferPacket*) buf;
   int rssi = sniffer->rx_ctrl.rssi;
@@ -310,7 +323,6 @@ void configureMode(DeviceMode newMode) {
       wifi_promiscuous_enable(0);
       wifi_set_promiscuous_rx_cb(snifferCallback);
       wifi_promiscuous_enable(1);
-      Serial.println(F("\n[MODE 1/4] 2.4 GHz Wi-Fi Radar Scope"));
       break;
 
     case MODE_SCANNER:
@@ -319,7 +331,6 @@ void configureMode(DeviceMode newMode) {
       totalNetworksFound = 0;
       triggerWifiScan();
       lastScanTime = millis();
-      Serial.println(F("\n[MODE 2/4] Wi-Fi AP Scanner"));
       break;
 
     case MODE_RF_TRIPWIRE:
@@ -331,7 +342,6 @@ void configureMode(DeviceMode newMode) {
       calibrationStartTime = 0;
       maxNoiseObserved = 0.0;
       for (int i = 0; i < WAVE_POINTS; i++) waveBuffer[i] = 42;
-      Serial.println(F("\n[MODE 3/4] Device-Free RF Motion Tripwire"));
       break;
 
     case MODE_IR_DECODER:
@@ -339,7 +349,6 @@ void configureMode(DeviceMode newMode) {
       WiFi.mode(WIFI_OFF);
       irrecv.setUnknownThreshold(12);
       irrecv.enableIRIn();
-      Serial.println(F("\n[MODE 4/4] TSOP IR Remote Decoder"));
       break;
 
     case MODE_AP_CONFIG: {
@@ -355,13 +364,76 @@ void configureMode(DeviceMode newMode) {
       WiFi.softAP(AP_CONFIG_SSID, AP_CONFIG_PASS, 1, 0, 4);
 
       server.begin();
-      Serial.println(F("\n[MODE CONFIG] AP Web Config Started on http://192.168.4.1"));
       break;
     }
   }
 }
 
-// Clean Screensaver UI (Only Time and Date)
+void enterLockScreen() {
+  isDeviceLocked = true;
+  isClockModeActive = false;
+  resumeMode = currentMode;
+
+  // Halt active sniffing / sensors to save energy
+  wifi_promiscuous_enable(0);
+  irrecv.disableIRIn();
+  digitalWrite(EXTERNAL_LED, LOW);
+  alertLedActive = false;
+
+  display.clearDisplay();
+  display.display();
+}
+
+void unlockDevice() {
+  isDeviceLocked = false;
+  lastUserActivity = millis();
+  display.clearDisplay();
+  configureMode(resumeMode);
+}
+
+// EMO-Style Animated Robotic Eyes
+void drawEmoFace() {
+  unsigned long now = millis();
+
+  // Handle blink cycles
+  if (!isBlinking && (now - lastEyeAnim > random(2500, 5000))) {
+    isBlinking = true;
+    blinkStartTime = now;
+    lastEyeAnim = now;
+
+    // Random glance offset
+    eyeOffsetX = random(-8, 9);
+    eyeOffsetY = random(-4, 5);
+  }
+
+  if (isBlinking) {
+    if (now - blinkStartTime < 100) {
+      eyeHeight = 4; // Eye slits
+    } else {
+      isBlinking = false;
+      eyeHeight = 30; // Eyes fully open
+    }
+  }
+
+  display.clearDisplay();
+
+  const int eyeW = 28;
+  const int eyeCornerR = 7;
+  const int leftEyeBaseX = 26;
+  const int rightEyeBaseX = 74;
+  const int eyeBaseY = 17;
+
+  int lx = constrain(leftEyeBaseX + eyeOffsetX, 4, 46);
+  int rx = constrain(rightEyeBaseX + eyeOffsetX, 54, 96);
+  int y  = constrain(eyeBaseY + eyeOffsetY, 6, 28);
+
+  // Render left and right rounded EMO eyes
+  display.fillRoundRect(lx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, eyeCornerR, SSD1306_WHITE);
+  display.fillRoundRect(rx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, eyeCornerR, SSD1306_WHITE);
+
+  display.display();
+}
+
 void drawClockUI() {
   time_t now = time(nullptr);
   struct tm* timeinfo = localtime(&now);
@@ -376,17 +448,14 @@ void drawClockUI() {
 
   snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", hour12, timeinfo->tm_min, timeinfo->tm_sec);
 
-  // Centered Large Time (HH:MM:SS)
   display.setTextSize(2);
   display.setCursor(4, 14);
   display.print(timeStr);
 
-  // AM / PM Indicator
   display.setTextSize(1);
   display.setCursor(104, 20);
   display.print(ampm);
 
-  // Full Date (e.g. "Sun, 20 Sep 2026")
   const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
@@ -592,7 +661,6 @@ void syncTimeAtStartup() {
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
     delay(100);
-    // Allow user to break into AP Config mode directly during startup
     if (digitalRead(BUTTON_PIN) == LOW) {
       configureMode(MODE_AP_CONFIG);
       return;
@@ -629,23 +697,19 @@ void setup() {
 
   loadCredentials();
 
-  // Attach web routes
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleConfigSave);
 
-  // Initialize OLED (180-degree inverted view)
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.setRotation(2);
   display.clearDisplay();
   display.display();
 
-  // Connect to AP, sync accurate real-world NTP time
   syncTimeAtStartup();
 
   lastUserActivity = millis();
 
-  // If user didn't hold D5 to go to AP config, start in Radar Mode
   if (currentMode != MODE_AP_CONFIG) {
     configureMode(MODE_RADAR);
   }
@@ -660,42 +724,59 @@ void loop() {
     digitalWrite(EXTERNAL_LED, LOW);
   }
 
-  // 2. Button Handler with Visual Hold Progress Indicator
-  if (currentMillis - lastButtonCheck >= 30) {
+  // 2. Button Engine (Single-Click, Fast Double-Click, and 2-Second Hold)
+  if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
-    bool pinState = (digitalRead(BUTTON_PIN) == LOW); // True when pressed
+    bool pinState = (digitalRead(BUTTON_PIN) == LOW);
 
     if (pinState && !buttonIsPressed) {
-      // Button just pressed
+      // Button Press Event
       buttonIsPressed = true;
       buttonPressStartTime = currentMillis;
       holdThresholdMet = false;
     } 
     else if (pinState && buttonIsPressed) {
-      // Button is being held down
+      // Holding Down
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
-      if (!holdThresholdMet) {
+      if (!isDeviceLocked && !holdThresholdMet) {
         if (heldTime >= 2000) {
-          // Reached 2 seconds: Trigger AP Config Mode
           holdThresholdMet = true;
+          clickCount = 0; // Cancel single/double click
           lastUserActivity = currentMillis;
           isClockModeActive = false;
           configureMode(MODE_AP_CONFIG);
         } else if (heldTime >= 400) {
-          // Show visual hold countdown progress bar on screen
           display.fillRect(10, 56, (heldTime - 400) * 108 / 1600, 4, SSD1306_WHITE);
           display.display();
         }
       }
     } 
     else if (!pinState && buttonIsPressed) {
-      // Button was released
+      // Button Released Event
       buttonIsPressed = false;
       unsigned long duration = currentMillis - buttonPressStartTime;
 
-      // Only switch modes if the button was a short press (< 1.5s)
-      if (duration < 1500 && !holdThresholdMet) {
+      if (duration < 600 && !holdThresholdMet) {
+        clickCount++;
+        lastClickTime = currentMillis;
+
+        if (clickCount == 2) {
+          // Double Click Confirmed!
+          clickCount = 0;
+          if (isDeviceLocked) {
+            unlockDevice();
+          } else {
+            enterLockScreen();
+          }
+        }
+      }
+    }
+
+    // Resolve Single Click after gap timeout
+    if (clickCount == 1 && (currentMillis - lastClickTime > DOUBLE_CLICK_GAP)) {
+      clickCount = 0;
+      if (!isDeviceLocked) {
         lastUserActivity = currentMillis;
 
         if (isClockModeActive) {
@@ -714,13 +795,29 @@ void loop() {
     }
   }
 
-  // 3. 20-Second Inactivity Screen Saver (Active in all sensor modes)
-  if (currentMode != MODE_AP_CONFIG && !isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
-    isClockModeActive = true;
-    display.clearDisplay();
+  // 3. Automated Locks and Screen Savers
+  if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
+    // 1-minute auto-lock into EMO Face
+    if (currentMillis - lastUserActivity >= AUTO_LOCK_MS) {
+      enterLockScreen();
+    }
+    // 20-second clock screensaver (only if not locked)
+    else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
+      isClockModeActive = true;
+      display.clearDisplay();
+    }
   }
 
-  // 4. Clock Screensaver Renderer
+  // 4. UI Rendering Branches
+  if (isDeviceLocked) {
+    // Show EMO robotic face; clock and sensors are stopped
+    if (currentMillis - lastDisplayDraw >= 40) {
+      lastDisplayDraw = currentMillis;
+      drawEmoFace();
+    }
+    return; // Completely bypass background sniffing/sensors while locked
+  }
+
   if (isClockModeActive) {
     if (currentMillis - lastDisplayDraw >= 500) {
       lastDisplayDraw = currentMillis;
@@ -728,7 +825,7 @@ void loop() {
     }
   }
 
-  // 5. Active & Background Logic Execution
+  // 5. Active & Background Logic Execution (Only when unlocked)
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
