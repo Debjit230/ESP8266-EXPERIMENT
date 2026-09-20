@@ -20,12 +20,14 @@ extern "C" {
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Hardware Pin Definitions
-#define OLED_SDA     D3  // GPIO0
-#define OLED_SCL     D4  // GPIO2
-#define IR_RECV_PIN  D2  // TSOP OUT (GPIO4)
-#define BUTTON_PIN   D5  // Mode switch button (Active LOW)
-#define EXTERNAL_LED D1  // Visual indicator LED (Active HIGH)
-#define ONBOARD_LED  D0  // NodeMCU on-board LED (GPIO16, Active LOW)
+#define OLED_SDA      D3  // GPIO0 (OLED SDA)
+#define OLED_SCL      D4  // GPIO2 (OLED SCL - restored to D4)
+#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)
+#define BUTTON_PIN    D5  // Mode switch button (Active LOW)
+
+// Indicator LEDs Configuration
+#define EXTERNAL_LED  D1  // Main external indicator LED (Active HIGH)
+#define BOARD_LED     D0  // NodeMCU USB-side LED (GPIO16, Active LOW)
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
@@ -39,8 +41,8 @@ const char* AP_CONFIG_PASS = "12345678";
 
 char target_ssid[33]     = "";
 char target_password[65] = "";
-uint8_t userBrightness   = 255;  // Default manual level (1 - 255)
-bool autoDimEnabled      = false; // Default: Fully manual control
+uint8_t userBrightness   = 255;
+bool autoDimEnabled      = false;
 
 ESP8266WebServer server(80);
 
@@ -56,7 +58,6 @@ unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
 
-// OLED Hardware Brightness Control
 void setOledBrightness(uint8_t contrast) {
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(contrast);
@@ -65,15 +66,22 @@ void setOledBrightness(uint8_t contrast) {
 // Global Non-Blocking Alert LED Controller
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
-const unsigned long LED_ALERT_DURATION = 120;
+const unsigned long LED_ALERT_DURATION = 120; // 120ms flash duration
 
 void triggerLedAlert() {
-  if (isDeviceLocked) return; // Keep all LEDs completely dark when in EMO Lock Screen
-
   alertLedActive = true;
   alertLedStart = millis();
+
+  // Main external indicator ALWAYS flashes on detection (in modes, clock, AND EMO face)
   digitalWrite(EXTERNAL_LED, HIGH);
-  digitalWrite(ONBOARD_LED, LOW); // Active-LOW: LOW turns it ON
+
+  // Board LED (D0) flashes in sync (Active-LOW: LOW is ON)
+  digitalWrite(BOARD_LED, LOW);
+}
+
+void shutoffLeds() {
+  digitalWrite(EXTERNAL_LED, LOW);
+  digitalWrite(BOARD_LED, HIGH); // Active-LOW: HIGH is OFF
 }
 
 // Emotion Engine Definitions
@@ -362,13 +370,11 @@ void handleRoot() {
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
 
-    // Manual Brightness Slider
     html += "<div class='slider-container'>";
     html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
     html += "</div>";
 
-    // Optional Auto-Dim Feature Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
     html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
@@ -412,14 +418,12 @@ void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
 
-  // Mode changes keep the exact user manual brightness
   setOledBrightness(userBrightness);
 
   server.stop();
   wifi_promiscuous_enable(0);
   irrecv.disableIRIn();
-  digitalWrite(EXTERNAL_LED, LOW);
-  digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
+  shutoffLeds();
   alertLedActive = false;
 
   switch (currentMode) {
@@ -482,12 +486,9 @@ void enterLockScreen() {
   isClockModeActive = false;
   resumeMode = currentMode;
 
-  // Turn off both external and on-board LEDs completely
-  digitalWrite(EXTERNAL_LED, LOW);
-  digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
+  shutoffLeds();
   alertLedActive = false;
 
-  // Only dim if auto-dim was explicitly enabled in web portal
   if (autoDimEnabled) {
     uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
     setOledBrightness(dimLevel);
@@ -511,7 +512,6 @@ void unlockDevice() {
   isDeviceLocked = false;
   lastUserActivity = millis();
 
-  // Always restore user manual brightness
   setOledBrightness(userBrightness);
 
   display.clearDisplay();
@@ -892,13 +892,11 @@ void syncTimeAtStartup() {
 
 void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
-  pinMode(ONBOARD_LED, OUTPUT);
+  pinMode(BOARD_LED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(IR_RECV_PIN, INPUT_PULLUP);
 
-  // Set all LEDs to dark off-state by default
-  digitalWrite(EXTERNAL_LED, LOW);
-  digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
+  shutoffLeds();
 
   Serial.begin(115200);
   delay(100);
@@ -908,13 +906,13 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleConfigSave);
 
+  // Initialize OLED with SCL on D4 and SDA on D3
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.setRotation(2);
   display.clearDisplay();
   display.display();
 
-  // Apply user manual brightness from EEPROM
   setOledBrightness(userBrightness);
 
   syncTimeAtStartup();
@@ -932,11 +930,10 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Universal Non-Blocking Alert LED Pulse Shutoff
+  // 1. Alert Pulse Auto-Shutoff (120ms)
   if (alertLedActive && (currentMillis - alertLedStart >= LED_ALERT_DURATION)) {
     alertLedActive = false;
-    digitalWrite(EXTERNAL_LED, LOW);
-    digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
+    shutoffLeds();
   }
 
   // 2. Button Engine (Single-Click, Fast Double-Click, and 2-Second Hold)
