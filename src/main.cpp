@@ -31,10 +31,13 @@ const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
 const char* AP_CONFIG_PASS = "12345678";
 
 // EEPROM Storage Settings
-#define EEPROM_SIZE 96
+#define EEPROM_SIZE 128
 #define EEPROM_MAGIC 0x5A
+#define EEPROM_BRIGHT_ADDR 97
+
 char target_ssid[33]     = "";
 char target_password[65] = "";
+uint8_t userBrightness   = 255; // Default full brightness (1 - 255)
 
 ESP8266WebServer server(80);
 
@@ -225,13 +228,21 @@ void loadCredentials() {
     target_ssid[32] = '\0';
     for (int i = 0; i < 64; i++) target_password[i] = EEPROM.read(33 + i);
     target_password[64] = '\0';
+
+    uint8_t storedBright = EEPROM.read(EEPROM_BRIGHT_ADDR);
+    if (storedBright >= 1 && storedBright <= 255) {
+      userBrightness = storedBright;
+    } else {
+      userBrightness = 255;
+    }
   } else {
     strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
     strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
+    userBrightness = 255;
   }
 }
 
-void saveCredentials(const String& newSSID, const String& newPass) {
+void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright) {
   EEPROM.write(0, EEPROM_MAGIC);
   for (int i = 0; i < 32; i++) {
     EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
@@ -239,9 +250,12 @@ void saveCredentials(const String& newSSID, const String& newPass) {
   for (int i = 0; i < 64; i++) {
     EEPROM.write(33 + i, i < (int)newPass.length() ? newPass[i] : 0);
   }
+  EEPROM.write(EEPROM_BRIGHT_ADDR, newBright);
   EEPROM.commit();
+
   newSSID.toCharArray(target_ssid, sizeof(target_ssid));
   newPass.toCharArray(target_password, sizeof(target_password));
+  userBrightness = newBright;
 }
 
 void registerTarget(uint8_t* mac, int rssi) {
@@ -307,12 +321,16 @@ void handleRoot() {
 
     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>body{font-family:Arial,sans-serif;background:#121212;color:#eee;text-align:center;padding:20px;}";
-    html += "form{background:#1f1f1f;padding:20px;border-radius:10px;display:inline-block;max-width:320px;width:100%;}";
-    html += "select,input{width:90%;padding:10px;margin:10px 0;border-radius:5px;border:none;background:#2a2a2a;color:#fff;}";
-    html += "input[type=submit]{background:#00bcd4;color:#fff;font-weight:bold;cursor:pointer;}";
+    html += "form{background:#1f1f1f;padding:22px;border-radius:12px;display:inline-block;max-width:340px;width:100%;box-sizing:border-box;}";
+    html += "select,input[type=password],input[type=text]{width:100%;padding:10px;margin:8px 0 16px 0;border-radius:6px;border:1px solid #333;background:#2a2a2a;color:#fff;box-sizing:border-box;}";
+    html += ".slider-container{margin:15px 0 20px 0;text-align:left;}";
+    html += "input[type=range]{width:100%;margin:10px 0;accent-color:#00bcd4;cursor:pointer;}";
+    html += "input[type=submit]{width:100%;background:#00bcd4;color:#fff;padding:12px;border:none;border-radius:6px;font-weight:bold;font-size:16px;cursor:pointer;}";
+    html += "label{font-size:14px;color:#aaa;display:block;text-align:left;font-weight:bold;}";
+    html += ".val-badge{float:right;color:#00bcd4;font-size:14px;}";
     html += "</style></head><body><h2>Sentinel AP Setup</h2>";
     html += "<form method='POST' action='/save'>";
-    html += "<label>Select Nearby Wi-Fi:</label><br><select name='ssid'>";
+    html += "<label>Select Nearby Wi-Fi:</label><select name='ssid'>";
 
     if (n == 0) {
       html += "<option value=''>No networks found</option>";
@@ -321,12 +339,21 @@ void handleRoot() {
         String s = WiFi.SSID(i);
         s.trim();
         if (s.length() > 0) {
-          html += "<option value='" + s + "'>" + s + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+          String selected = (s == String(target_ssid)) ? " selected" : "";
+          html += "<option value='" + s + "'" + selected + ">" + s + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
         }
       }
     }
 
-    html += "</select><br><label>Password:</label><br><input type='password' name='pass'><br>";
+    html += "</select><label>Password:</label>";
+    html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
+    
+    // OLED Brightness Slider
+    html += "<div class='slider-container'>";
+    html += "<label>OLED Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
+    html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
+    html += "</div>";
+
     html += "<input type='submit' value='Save & Reboot'></form></body></html>";
     server.send(200, "text/html", html);
   } else {
@@ -335,13 +362,22 @@ void handleRoot() {
 }
 
 void handleConfigSave() {
-  String reqSSID = server.arg("ssid");
-  String reqPass = server.arg("pass");
+  String reqSSID   = server.arg("ssid");
+  String reqPass   = server.arg("pass");
+  String reqBright = server.arg("bright");
+
+  uint8_t newBright = userBrightness;
+  if (reqBright.length() > 0) {
+    int b = reqBright.toInt();
+    if (b >= 1 && b <= 255) newBright = (uint8_t)b;
+  }
 
   if (reqSSID.length() > 0) {
-    saveCredentials(reqSSID, reqPass);
+    saveSettings(reqSSID, reqPass, newBright);
+    setOledBrightness(newBright);
+
     String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
-    html += "<h2>Credentials Saved!</h2><p>Rebooting...</p></body></html>";
+    html += "<h2>Settings Saved!</h2><p>Brightness set to " + String(newBright) + "</p><p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
     delay(1500);
     ESP.restart();
@@ -354,8 +390,8 @@ void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
 
-  // Ensure full brightness is restored when entering any active sensor mode
-  setOledBrightness(255);
+  // Restore configured brightness when in any sensor mode
+  setOledBrightness(userBrightness);
 
   server.stop();
   wifi_promiscuous_enable(0);
@@ -423,8 +459,9 @@ void enterLockScreen() {
   isClockModeActive = false;
   resumeMode = currentMode;
 
-  // Dim display to soft ambient glow during EMO lock screen
-  setOledBrightness(15);
+  // Soft dim ambient glow for EMO Face (proportional to user brightness)
+  uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
+  setOledBrightness(dimLevel);
 
   if (isNightWindow()) {
     currentEmotion = EMO_SLEEP;
@@ -442,8 +479,8 @@ void unlockDevice() {
   isDeviceLocked = false;
   lastUserActivity = millis();
 
-  // Restore 100% full brightness upon waking
-  setOledBrightness(255);
+  // Restore configured brightness upon unlocking
+  setOledBrightness(userBrightness);
 
   display.clearDisplay();
   configureMode(resumeMode);
@@ -616,8 +653,9 @@ void drawConfigUI() {
   display.setCursor(0, 26);
   display.println("Pass: 12345678");
 
-  display.setCursor(0, 40);
-  display.println("Open in Browser:");
+  display.setCursor(0, 38);
+  display.printf("Bright: %d/255\n", userBrightness);
+
   display.setCursor(0, 52);
   display.println("http://192.168.4.1");
 
@@ -838,8 +876,8 @@ void setup() {
   display.clearDisplay();
   display.display();
 
-  // Full brightness for startup prompts
-  setOledBrightness(255);
+  // Apply user-configured brightness from EEPROM
+  setOledBrightness(userBrightness);
 
   syncTimeAtStartup();
 
@@ -914,7 +952,7 @@ void loop() {
 
         if (isClockModeActive) {
           isClockModeActive = false;
-          setOledBrightness(255); // Restore bright display
+          setOledBrightness(userBrightness);
           display.clearDisplay();
         } else {
           DeviceMode nextMode;
@@ -935,7 +973,8 @@ void loop() {
       enterLockScreen();
     } else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
-      setOledBrightness(15); // Dim display during clock screensaver
+      uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
+      setOledBrightness(dimLevel);
       display.clearDisplay();
     }
   }
@@ -1089,7 +1128,7 @@ void loop() {
             lastUserActivity = currentMillis;
             if (isClockModeActive) {
               isClockModeActive = false;
-              setOledBrightness(255); // Restore bright display
+              setOledBrightness(userBrightness);
               display.clearDisplay();
             }
           }
