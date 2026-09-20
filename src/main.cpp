@@ -33,11 +33,13 @@ const char* AP_CONFIG_PASS = "12345678";
 // EEPROM Storage Settings
 #define EEPROM_SIZE 128
 #define EEPROM_MAGIC 0x5A
-#define EEPROM_BRIGHT_ADDR 97
+#define EEPROM_BRIGHT_ADDR   97
+#define EEPROM_AUTODIM_ADDR  98
 
 char target_ssid[33]     = "";
 char target_password[65] = "";
-uint8_t userBrightness   = 255; // Default full brightness (1 - 255)
+uint8_t userBrightness   = 255;  // Default manual level (1 - 255)
+bool autoDimEnabled      = false; // Default: Fully manual control
 
 ESP8266WebServer server(80);
 
@@ -235,14 +237,18 @@ void loadCredentials() {
     } else {
       userBrightness = 255;
     }
+
+    uint8_t storedDim = EEPROM.read(EEPROM_AUTODIM_ADDR);
+    autoDimEnabled = (storedDim == 1);
   } else {
     strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
     strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
     userBrightness = 255;
+    autoDimEnabled = false;
   }
 }
 
-void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright) {
+void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright, bool newDim) {
   EEPROM.write(0, EEPROM_MAGIC);
   for (int i = 0; i < 32; i++) {
     EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
@@ -251,11 +257,13 @@ void saveSettings(const String& newSSID, const String& newPass, uint8_t newBrigh
     EEPROM.write(33 + i, i < (int)newPass.length() ? newPass[i] : 0);
   }
   EEPROM.write(EEPROM_BRIGHT_ADDR, newBright);
+  EEPROM.write(EEPROM_AUTODIM_ADDR, newDim ? 1 : 0);
   EEPROM.commit();
 
   newSSID.toCharArray(target_ssid, sizeof(target_ssid));
   newPass.toCharArray(target_password, sizeof(target_password));
   userBrightness = newBright;
+  autoDimEnabled = newDim;
 }
 
 void registerTarget(uint8_t* mac, int rssi) {
@@ -323,8 +331,10 @@ void handleRoot() {
     html += "<style>body{font-family:Arial,sans-serif;background:#121212;color:#eee;text-align:center;padding:20px;}";
     html += "form{background:#1f1f1f;padding:22px;border-radius:12px;display:inline-block;max-width:340px;width:100%;box-sizing:border-box;}";
     html += "select,input[type=password],input[type=text]{width:100%;padding:10px;margin:8px 0 16px 0;border-radius:6px;border:1px solid #333;background:#2a2a2a;color:#fff;box-sizing:border-box;}";
-    html += ".slider-container{margin:15px 0 20px 0;text-align:left;}";
+    html += ".slider-container{margin:15px 0 10px 0;text-align:left;}";
+    html += ".toggle-container{margin:15px 0 20px 0;text-align:left;display:flex;align-items:center;}";
     html += "input[type=range]{width:100%;margin:10px 0;accent-color:#00bcd4;cursor:pointer;}";
+    html += "input[type=checkbox]{width:18px;height:18px;margin-right:10px;accent-color:#00bcd4;cursor:pointer;}";
     html += "input[type=submit]{width:100%;background:#00bcd4;color:#fff;padding:12px;border:none;border-radius:6px;font-weight:bold;font-size:16px;cursor:pointer;}";
     html += "label{font-size:14px;color:#aaa;display:block;text-align:left;font-weight:bold;}";
     html += ".val-badge{float:right;color:#00bcd4;font-size:14px;}";
@@ -347,11 +357,17 @@ void handleRoot() {
 
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
-    
-    // OLED Brightness Slider
+
+    // Manual Brightness Slider
     html += "<div class='slider-container'>";
-    html += "<label>OLED Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
+    html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
+    html += "</div>";
+
+    // Optional Auto-Dim Feature Toggle
+    html += "<div class='toggle-container'>";
+    html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
+    html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
     html += "</div>";
 
     html += "<input type='submit' value='Save & Reboot'></form></body></html>";
@@ -362,9 +378,10 @@ void handleRoot() {
 }
 
 void handleConfigSave() {
-  String reqSSID   = server.arg("ssid");
-  String reqPass   = server.arg("pass");
-  String reqBright = server.arg("bright");
+  String reqSSID    = server.arg("ssid");
+  String reqPass    = server.arg("pass");
+  String reqBright  = server.arg("bright");
+  bool reqAutoDim   = server.hasArg("autodim");
 
   uint8_t newBright = userBrightness;
   if (reqBright.length() > 0) {
@@ -373,11 +390,12 @@ void handleConfigSave() {
   }
 
   if (reqSSID.length() > 0) {
-    saveSettings(reqSSID, reqPass, newBright);
+    saveSettings(reqSSID, reqPass, newBright, reqAutoDim);
     setOledBrightness(newBright);
 
     String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
-    html += "<h2>Settings Saved!</h2><p>Brightness set to " + String(newBright) + "</p><p>Rebooting...</p></body></html>";
+    html += "<h2>Settings Saved!</h2><p>Brightness: " + String(newBright) + "</p>";
+    html += "<p>Auto-dim: " + String(reqAutoDim ? "Enabled" : "Disabled") + "</p><p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
     delay(1500);
     ESP.restart();
@@ -390,7 +408,7 @@ void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
 
-  // Restore configured brightness when in any sensor mode
+  // Mode changes keep the exact user manual brightness
   setOledBrightness(userBrightness);
 
   server.stop();
@@ -459,9 +477,13 @@ void enterLockScreen() {
   isClockModeActive = false;
   resumeMode = currentMode;
 
-  // Soft dim ambient glow for EMO Face (proportional to user brightness)
-  uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
-  setOledBrightness(dimLevel);
+  // Only dim if auto-dim was explicitly enabled in web portal
+  if (autoDimEnabled) {
+    uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
+    setOledBrightness(dimLevel);
+  } else {
+    setOledBrightness(userBrightness);
+  }
 
   if (isNightWindow()) {
     currentEmotion = EMO_SLEEP;
@@ -479,7 +501,7 @@ void unlockDevice() {
   isDeviceLocked = false;
   lastUserActivity = millis();
 
-  // Restore configured brightness upon unlocking
+  // Always keep user manual brightness
   setOledBrightness(userBrightness);
 
   display.clearDisplay();
@@ -648,15 +670,17 @@ void drawConfigUI() {
   display.println("--- AP CONFIG ---");
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
-  display.setCursor(0, 14);
+  display.setCursor(0, 13);
   display.println("SSID: ESP-Sentinel");
-  display.setCursor(0, 26);
+  display.setCursor(0, 24);
   display.println("Pass: 12345678");
 
-  display.setCursor(0, 38);
+  display.setCursor(0, 36);
   display.printf("Bright: %d/255\n", userBrightness);
+  display.setCursor(0, 46);
+  display.printf("Auto-Dim: %s\n", autoDimEnabled ? "ON" : "OFF");
 
-  display.setCursor(0, 52);
+  display.setCursor(0, 56);
   display.println("http://192.168.4.1");
 
   display.display();
@@ -876,7 +900,7 @@ void setup() {
   display.clearDisplay();
   display.display();
 
-  // Apply user-configured brightness from EEPROM
+  // Apply user-configured manual brightness immediately
   setOledBrightness(userBrightness);
 
   syncTimeAtStartup();
@@ -973,8 +997,12 @@ void loop() {
       enterLockScreen();
     } else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
-      uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
-      setOledBrightness(dimLevel);
+      if (autoDimEnabled) {
+        uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
+        setOledBrightness(dimLevel);
+      } else {
+        setOledBrightness(userBrightness);
+      }
       display.clearDisplay();
     }
   }
