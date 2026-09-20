@@ -61,6 +61,42 @@ void triggerLedAlert() {
   digitalWrite(EXTERNAL_LED, HIGH);
 }
 
+// Emotion Engine Definitions
+enum EmoState {
+  EMO_NORMAL,
+  EMO_SUSPICIOUS,
+  EMO_SHOCKED,
+  EMO_WINK,
+  EMO_SLEEP,
+  EMO_GOOD_MORNING
+};
+
+EmoState currentEmotion = EMO_NORMAL;
+unsigned long emotionHoldStartTime = 0;
+const unsigned long EMOTION_HOLD_MS = 2200;
+
+void setEmotion(EmoState newEmo) {
+  currentEmotion = newEmo;
+  emotionHoldStartTime = millis();
+}
+
+// Helper to check morning greeting window (6:00 AM to 7:30 AM)
+bool isMorningWindow() {
+  time_t tNow = time(nullptr);
+  struct tm* timeinfo = localtime(&tNow);
+  if (timeinfo->tm_hour == 6) return true;
+  if (timeinfo->tm_hour == 7 && timeinfo->tm_min <= 30) return true;
+  return false;
+}
+
+// Helper to check late-night sleeping window (11:00 PM to 6:00 AM)
+bool isNightWindow() {
+  time_t tNow = time(nullptr);
+  struct tm* timeinfo = localtime(&tNow);
+  if (timeinfo->tm_hour >= 23 || timeinfo->tm_hour < 6) return true;
+  return false;
+}
+
 // IR Configuration
 const uint16_t kCaptureBufferSize = 1024;
 const uint8_t kTimeout = 50;
@@ -166,15 +202,17 @@ unsigned long buttonPressStartTime = 0;
 bool holdThresholdMet = false;
 int clickCount = 0;
 unsigned long lastClickTime = 0;
-const unsigned long DOUBLE_CLICK_GAP = 350; // max ms between two fast clicks
+const unsigned long DOUBLE_CLICK_GAP = 350;
 
-// EMO Face Animation State Machine
+// EMO Animation Parameters
 unsigned long lastEyeAnim = 0;
 int eyeOffsetX = 0;
 int eyeOffsetY = 0;
 int eyeHeight  = 30;
 bool isBlinking = false;
 unsigned long blinkStartTime = 0;
+int zzzStep = 0;
+unsigned long lastZzzAnim = 0;
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -232,10 +270,15 @@ void registerTarget(uint8_t* mac, int rssi) {
   targets[targetIndex].active = true;
 
   triggerLedAlert();
+
+  // Suspicious Squint triggered on ANY detected packet/RSSI
+  if (isDeviceLocked) {
+    setEmotion(EMO_SUSPICIOUS);
+  }
 }
 
 void snifferCallback(uint8_t *buf, uint16_t len) {
-  if (isDeviceLocked || currentMode != MODE_RADAR || len == 12) return;
+  if (len == 12) return;
 
   struct SnifferPacket *sniffer = (struct SnifferPacket*) buf;
   int rssi = sniffer->rx_ctrl.rssi;
@@ -374,11 +417,13 @@ void enterLockScreen() {
   isClockModeActive = false;
   resumeMode = currentMode;
 
-  // Halt active sniffing / sensors to save energy
-  wifi_promiscuous_enable(0);
-  irrecv.disableIRIn();
-  digitalWrite(EXTERNAL_LED, LOW);
-  alertLedActive = false;
+  if (isNightWindow()) {
+    currentEmotion = EMO_SLEEP;
+  } else if (isMorningWindow()) {
+    setEmotion(EMO_GOOD_MORNING);
+  } else {
+    currentEmotion = EMO_NORMAL;
+  }
 
   display.clearDisplay();
   display.display();
@@ -391,45 +436,122 @@ void unlockDevice() {
   configureMode(resumeMode);
 }
 
-// EMO-Style Animated Robotic Eyes
+// Emotional Engine Renderer
 void drawEmoFace() {
   unsigned long now = millis();
 
-  // Handle blink cycles
-  if (!isBlinking && (now - lastEyeAnim > random(2500, 5000))) {
-    isBlinking = true;
-    blinkStartTime = now;
-    lastEyeAnim = now;
-
-    // Random glance offset
-    eyeOffsetX = random(-8, 9);
-    eyeOffsetY = random(-4, 5);
-  }
-
-  if (isBlinking) {
-    if (now - blinkStartTime < 100) {
-      eyeHeight = 4; // Eye slits
-    } else {
-      isBlinking = false;
-      eyeHeight = 30; // Eyes fully open
+  // Reset temporary emotions back to base state after timer expires
+  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP) {
+    if (now - emotionHoldStartTime > EMOTION_HOLD_MS) {
+      currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
+    }
+  } else {
+    if (isNightWindow()) {
+      currentEmotion = EMO_SLEEP;
     }
   }
 
   display.clearDisplay();
 
   const int eyeW = 28;
-  const int eyeCornerR = 7;
   const int leftEyeBaseX = 26;
   const int rightEyeBaseX = 74;
   const int eyeBaseY = 17;
+
+  // 1. GOOD MORNING STATE (Warm cheerful greeting banner & happy arched eyes)
+  if (currentEmotion == EMO_GOOD_MORNING) {
+    // Arched happy eyes
+    display.fillRoundRect(leftEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
+    display.fillRoundRect(rightEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
+    display.fillRect(leftEyeBaseX, eyeBaseY + 16, eyeW, 14, SSD1306_BLACK);
+    display.fillRect(rightEyeBaseX, eyeBaseY + 16, eyeW, 14, SSD1306_BLACK);
+
+    // Good Morning text banner
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(22, 50);
+    display.print("GOOD MORNING!");
+
+    display.display();
+    return;
+  }
+
+  // 2. SLEEPING STATE (Late night idle companion with animated floating Zzz)
+  if (currentEmotion == EMO_SLEEP) {
+    display.fillRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
+    display.fillRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
+
+    if (now - lastZzzAnim > 350) {
+      lastZzzAnim = now;
+      zzzStep = (zzzStep + 1) % 4;
+    }
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    if (zzzStep >= 1) { display.setCursor(98, 24); display.print("z"); }
+    if (zzzStep >= 2) { display.setCursor(106, 15); display.print("Z"); }
+    if (zzzStep >= 3) { display.setCursor(114, 6);  display.print("Z"); }
+
+    display.display();
+    return;
+  }
+
+  // 3. SHOCKED STATE (Wide round eyes with central black pupils)
+  if (currentEmotion == EMO_SHOCKED) {
+    display.fillCircle(leftEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
+    display.fillCircle(rightEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
+    display.fillCircle(leftEyeBaseX + 14, eyeBaseY + 15, 5, SSD1306_BLACK);
+    display.fillCircle(rightEyeBaseX + 14, eyeBaseY + 15, 5, SSD1306_BLACK);
+
+    display.display();
+    return;
+  }
+
+  // 4. SUSPICIOUS / SQUINT STATE (Angled flattened eyelids on any detected Wi-Fi device)
+  if (currentEmotion == EMO_SUSPICIOUS) {
+    display.fillRoundRect(leftEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
+    display.fillRoundRect(rightEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
+
+    display.fillTriangle(leftEyeBaseX, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 15, SSD1306_BLACK);
+    display.fillTriangle(rightEyeBaseX, eyeBaseY + 8, rightEyeBaseX + eyeW, eyeBaseY + 8, rightEyeBaseX, eyeBaseY + 15, SSD1306_BLACK);
+
+    display.display();
+    return;
+  }
+
+  // 5. WINK STATE (Left eye wide, Right eye wink line)
+  if (currentEmotion == EMO_WINK) {
+    display.fillRoundRect(leftEyeBaseX, eyeBaseY, eyeW, 30, 7, SSD1306_WHITE);
+    display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 4, 2, SSD1306_WHITE);
+
+    display.display();
+    return;
+  }
+
+  // 6. NORMAL IDLE STATE (Rounded eyes with spontaneous blinks and glances)
+  if (!isBlinking && (now - lastEyeAnim > random(2500, 5000))) {
+    isBlinking = true;
+    blinkStartTime = now;
+    lastEyeAnim = now;
+
+    eyeOffsetX = random(-7, 8);
+    eyeOffsetY = random(-4, 5);
+  }
+
+  if (isBlinking) {
+    if (now - blinkStartTime < 100) {
+      eyeHeight = 4;
+    } else {
+      isBlinking = false;
+      eyeHeight = 30;
+    }
+  }
 
   int lx = constrain(leftEyeBaseX + eyeOffsetX, 4, 46);
   int rx = constrain(rightEyeBaseX + eyeOffsetX, 54, 96);
   int y  = constrain(eyeBaseY + eyeOffsetY, 6, 28);
 
-  // Render left and right rounded EMO eyes
-  display.fillRoundRect(lx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, eyeCornerR, SSD1306_WHITE);
-  display.fillRoundRect(rx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, eyeCornerR, SSD1306_WHITE);
+  display.fillRoundRect(lx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, 7, SSD1306_WHITE);
+  display.fillRoundRect(rx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, 7, SSD1306_WHITE);
 
   display.display();
 }
@@ -710,7 +832,11 @@ void setup() {
 
   lastUserActivity = millis();
 
-  if (currentMode != MODE_AP_CONFIG) {
+  // If boot happens during the morning window, display greeting right away
+  if (isMorningWindow()) {
+    enterLockScreen();
+    setEmotion(EMO_GOOD_MORNING);
+  } else if (currentMode != MODE_AP_CONFIG) {
     configureMode(MODE_RADAR);
   }
 }
@@ -730,19 +856,17 @@ void loop() {
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
 
     if (pinState && !buttonIsPressed) {
-      // Button Press Event
       buttonIsPressed = true;
       buttonPressStartTime = currentMillis;
       holdThresholdMet = false;
     } 
     else if (pinState && buttonIsPressed) {
-      // Holding Down
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!isDeviceLocked && !holdThresholdMet) {
         if (heldTime >= 2000) {
           holdThresholdMet = true;
-          clickCount = 0; // Cancel single/double click
+          clickCount = 0;
           lastUserActivity = currentMillis;
           isClockModeActive = false;
           configureMode(MODE_AP_CONFIG);
@@ -753,7 +877,6 @@ void loop() {
       }
     } 
     else if (!pinState && buttonIsPressed) {
-      // Button Released Event
       buttonIsPressed = false;
       unsigned long duration = currentMillis - buttonPressStartTime;
 
@@ -762,7 +885,6 @@ void loop() {
         lastClickTime = currentMillis;
 
         if (clickCount == 2) {
-          // Double Click Confirmed!
           clickCount = 0;
           if (isDeviceLocked) {
             unlockDevice();
@@ -773,7 +895,6 @@ void loop() {
       }
     }
 
-    // Resolve Single Click after gap timeout
     if (clickCount == 1 && (currentMillis - lastClickTime > DOUBLE_CLICK_GAP)) {
       clickCount = 0;
       if (!isDeviceLocked) {
@@ -797,35 +918,28 @@ void loop() {
 
   // 3. Automated Locks and Screen Savers
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
-    // 1-minute auto-lock into EMO Face
     if (currentMillis - lastUserActivity >= AUTO_LOCK_MS) {
       enterLockScreen();
-    }
-    // 20-second clock screensaver (only if not locked)
-    else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
+    } else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
       display.clearDisplay();
     }
   }
 
-  // 4. UI Rendering Branches
+  // 4. UI Display Handlers
   if (isDeviceLocked) {
-    // Show EMO robotic face; clock and sensors are stopped
     if (currentMillis - lastDisplayDraw >= 40) {
       lastDisplayDraw = currentMillis;
       drawEmoFace();
     }
-    return; // Completely bypass background sniffing/sensors while locked
-  }
-
-  if (isClockModeActive) {
+  } else if (isClockModeActive) {
     if (currentMillis - lastDisplayDraw >= 500) {
       lastDisplayDraw = currentMillis;
       drawClockUI();
     }
   }
 
-  // 5. Active & Background Logic Execution (Only when unlocked)
+  // 5. Active & Background Logic Execution
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
@@ -835,7 +949,7 @@ void loop() {
         wifi_set_channel(currentChannel);
       }
 
-      if (!isClockModeActive && (currentMillis - lastDisplayDraw >= 50)) {
+      if (!isDeviceLocked && !isClockModeActive && (currentMillis - lastDisplayDraw >= 50)) {
         lastDisplayDraw = currentMillis;
         sweepAngle += 0.15;
         if (sweepAngle >= 2 * PI) sweepAngle = 0;
@@ -845,21 +959,23 @@ void loop() {
     }
 
     case MODE_SCANNER: {
-      if (!scanningInProgress && (currentMillis - lastScanTime >= SCAN_INTERVAL)) {
-        lastScanTime = currentMillis;
-        triggerWifiScan();
-      }
+      if (!isDeviceLocked) {
+        if (!scanningInProgress && (currentMillis - lastScanTime >= SCAN_INTERVAL)) {
+          lastScanTime = currentMillis;
+          triggerWifiScan();
+        }
 
-      if (!isClockModeActive && (currentMillis - lastDisplayDraw >= 200)) {
-        lastDisplayDraw = currentMillis;
-        drawScannerUI();
+        if (!isClockModeActive && (currentMillis - lastDisplayDraw >= 200)) {
+          lastDisplayDraw = currentMillis;
+          drawScannerUI();
+        }
       }
       break;
     }
 
     case MODE_RF_TRIPWIRE: {
       if (WiFi.status() != WL_CONNECTED) {
-        if (!isClockModeActive && (currentMillis - lastDisplayDraw >= 300)) {
+        if (!isDeviceLocked && !isClockModeActive && (currentMillis - lastDisplayDraw >= 300)) {
           lastDisplayDraw = currentMillis;
           display.clearDisplay();
           display.setTextColor(SSD1306_WHITE);
@@ -899,7 +1015,7 @@ void loop() {
             isCalibrating = false;
           }
 
-          if (!isClockModeActive) {
+          if (!isDeviceLocked && !isClockModeActive) {
             display.clearDisplay();
             display.setTextColor(SSD1306_WHITE);
             display.setTextSize(1);
@@ -919,6 +1035,11 @@ void loop() {
         if (delta >= dynamicThreshold) {
           lastMotionDetected = currentMillis;
           triggerLedAlert();
+
+          // Shocked expression on room tripwire motion
+          if (isDeviceLocked) {
+            setEmotion(EMO_SHOCKED);
+          }
         }
 
         bool isMotionActive = (currentMillis - lastMotionDetected < ALARM_HOLD_TIME);
@@ -929,7 +1050,7 @@ void loop() {
         waveBuffer[waveIndex] = yVal;
         waveIndex = (waveIndex + 1) % WAVE_POINTS;
 
-        if (!isClockModeActive) {
+        if (!isDeviceLocked && !isClockModeActive) {
           drawTripwireUI(delta, currentRssi, isMotionActive);
         }
       }
@@ -948,16 +1069,21 @@ void loop() {
           lastBits     = irResults.bits;
 
           triggerLedAlert();
-          lastUserActivity = currentMillis;
-          if (isClockModeActive) {
-            isClockModeActive = false;
-            display.clearDisplay();
+
+          if (isDeviceLocked) {
+            setEmotion(EMO_WINK);
+          } else {
+            lastUserActivity = currentMillis;
+            if (isClockModeActive) {
+              isClockModeActive = false;
+              display.clearDisplay();
+            }
           }
         }
         irrecv.resume();
       }
 
-      if (!isClockModeActive && (currentMillis - lastDisplayDraw >= 100)) {
+      if (!isDeviceLocked && !isClockModeActive && (currentMillis - lastDisplayDraw >= 100)) {
         lastDisplayDraw = currentMillis;
         drawDecoderUI();
       }
