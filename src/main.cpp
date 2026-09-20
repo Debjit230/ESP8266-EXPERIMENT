@@ -21,7 +21,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Hardware Pin Definitions
 #define OLED_SDA      D3  // GPIO0 (OLED SDA)
-#define OLED_SCL      D4  // GPIO2 (OLED SCL - restored to D4)
+#define OLED_SCL      D4  // GPIO2 (OLED SCL)
 #define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)
 #define BUTTON_PIN    D5  // Mode switch button (Active LOW)
 
@@ -72,11 +72,8 @@ void triggerLedAlert() {
   alertLedActive = true;
   alertLedStart = millis();
 
-  // Main external indicator ALWAYS flashes on detection (in modes, clock, AND EMO face)
   digitalWrite(EXTERNAL_LED, HIGH);
-
-  // Board LED (D0) flashes in sync (Active-LOW: LOW is ON)
-  digitalWrite(BOARD_LED, LOW);
+  digitalWrite(BOARD_LED, LOW); // Active-LOW: LOW is ON
 }
 
 void shutoffLeds() {
@@ -91,7 +88,8 @@ enum EmoState {
   EMO_SHOCKED,
   EMO_WINK,
   EMO_SLEEP,
-  EMO_GOOD_MORNING
+  EMO_GOOD_MORNING,
+  EMO_DIZZY
 };
 
 EmoState currentEmotion = EMO_NORMAL;
@@ -225,15 +223,21 @@ int clickCount = 0;
 unsigned long lastClickTime = 0;
 const unsigned long DOUBLE_CLICK_GAP = 350;
 
-// EMO Animation Parameters
-unsigned long lastEyeAnim = 0;
-int eyeOffsetX = 0;
-int eyeOffsetY = 0;
-int eyeHeight  = 30;
+// Advanced EMO Eye Coordinates with LERP Motion Smoothing
+float currentEyeX = 0.0;
+float currentEyeY = 0.0;
+float targetEyeX  = 0.0;
+float targetEyeY  = 0.0;
+
+float currentEyeH = 30.0;
+float targetEyeH  = 30.0;
+
+unsigned long lastEyeTargetShift = 0;
 bool isBlinking = false;
 unsigned long blinkStartTime = 0;
 int zzzStep = 0;
 unsigned long lastZzzAnim = 0;
+float dizzyAngle = 0.0;
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -518,12 +522,16 @@ void unlockDevice() {
   configureMode(resumeMode);
 }
 
-// Emotional Engine Renderer
+// Advanced Smooth EMO Renderer with LERP Interpolation
 void drawEmoFace() {
   unsigned long now = millis();
 
-  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP) {
+  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP && currentEmotion != EMO_DIZZY) {
     if (now - emotionHoldStartTime > EMOTION_HOLD_MS) {
+      currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
+    }
+  } else if (currentEmotion == EMO_DIZZY) {
+    if (now - emotionHoldStartTime > 2500) {
       currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
     }
   } else {
@@ -539,7 +547,26 @@ void drawEmoFace() {
   const int rightEyeBaseX = 74;
   const int eyeBaseY = 17;
 
-  // 1. GOOD MORNING STATE
+  // 1. DIZZY STATE (Smooth rotating spirals)
+  if (currentEmotion == EMO_DIZZY) {
+    dizzyAngle += 0.35;
+    int lx = leftEyeBaseX + 14;
+    int rx = rightEyeBaseX + 14;
+    int cy = eyeBaseY + 15;
+
+    for (int r = 4; r <= 16; r += 4) {
+      display.drawCircle(lx, cy, r, SSD1306_WHITE);
+      display.drawCircle(rx, cy, r, SSD1306_WHITE);
+    }
+    // Rotating crosshairs to simulate spiraling eyes
+    display.drawLine(lx + cos(dizzyAngle) * 16, cy + sin(dizzyAngle) * 16, lx - cos(dizzyAngle) * 16, cy - sin(dizzyAngle) * 16, SSD1306_WHITE);
+    display.drawLine(rx + cos(dizzyAngle) * 16, cy + sin(dizzyAngle) * 16, rx - cos(dizzyAngle) * 16, cy - sin(dizzyAngle) * 16, SSD1306_WHITE);
+
+    display.display();
+    return;
+  }
+
+  // 2. GOOD MORNING STATE
   if (currentEmotion == EMO_GOOD_MORNING) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
@@ -555,7 +582,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 2. SLEEPING STATE
+  // 3. SLEEPING STATE
   if (currentEmotion == EMO_SLEEP) {
     display.fillRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
     display.fillRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
@@ -574,7 +601,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 3. SHOCKED STATE
+  // 4. SHOCKED STATE
   if (currentEmotion == EMO_SHOCKED) {
     display.fillCircle(leftEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
     display.fillCircle(rightEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
@@ -585,7 +612,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 4. SUSPICIOUS / SQUINT STATE
+  // 5. SUSPICIOUS / SQUINT STATE
   if (currentEmotion == EMO_SUSPICIOUS) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
@@ -597,7 +624,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 5. WINK STATE
+  // 6. WINK STATE
   if (currentEmotion == EMO_WINK) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY, eyeW, 30, 7, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 4, 2, SSD1306_WHITE);
@@ -606,31 +633,38 @@ void drawEmoFace() {
     return;
   }
 
-  // 6. NORMAL IDLE STATE
-  if (!isBlinking && (now - lastEyeAnim > random(2500, 5000))) {
-    isBlinking = true;
-    blinkStartTime = now;
-    lastEyeAnim = now;
+  // 7. NORMAL IDLE STATE WITH LERP GLIDE & BLINKING
+  if (!isBlinking && (now - lastEyeTargetShift > random(2400, 4500))) {
+    lastEyeTargetShift = now;
 
-    eyeOffsetX = random(-7, 8);
-    eyeOffsetY = random(-4, 5);
-  }
-
-  if (isBlinking) {
-    if (now - blinkStartTime < 100) {
-      eyeHeight = 4;
+    // 35% chance to blink, 65% chance to smoothly look around
+    if (random(0, 100) < 35) {
+      isBlinking = true;
+      blinkStartTime = now;
+      targetEyeH = 3.0; // Eyes compress down
     } else {
-      isBlinking = false;
-      eyeHeight = 30;
+      targetEyeX = random(-8, 9);
+      targetEyeY = random(-4, 5);
     }
   }
 
-  int lx = constrain(leftEyeBaseX + eyeOffsetX, 4, 46);
-  int rx = constrain(rightEyeBaseX + eyeOffsetX, 54, 96);
-  int y  = constrain(eyeBaseY + eyeOffsetY, 6, 28);
+  if (isBlinking && (now - blinkStartTime > 140)) {
+    isBlinking = false;
+    targetEyeH = 30.0; // Re-expand eyes
+  }
 
-  display.fillRoundRect(lx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, 7, SSD1306_WHITE);
-  display.fillRoundRect(rx, y + (30 - eyeHeight) / 2, eyeW, eyeHeight, 7, SSD1306_WHITE);
+  // Linear Interpolation (Easing) for smooth motion
+  currentEyeX += (targetEyeX - currentEyeX) * 0.25;
+  currentEyeY += (targetEyeY - currentEyeY) * 0.25;
+  currentEyeH += (targetEyeH - currentEyeH) * 0.35;
+
+  int renderH = constrain((int)currentEyeH, 3, 30);
+  int lx = constrain(leftEyeBaseX + (int)currentEyeX, 4, 46);
+  int rx = constrain(rightEyeBaseX + (int)currentEyeX, 54, 96);
+  int y  = constrain(eyeBaseY + (int)currentEyeY + (30 - renderH) / 2, 6, 32);
+
+  display.fillRoundRect(lx, y, eyeW, renderH, 7, SSD1306_WHITE);
+  display.fillRoundRect(rx, y, eyeW, renderH, 7, SSD1306_WHITE);
 
   display.display();
 }
@@ -936,7 +970,7 @@ void loop() {
     shutoffLeds();
   }
 
-  // 2. Button Engine (Single-Click, Fast Double-Click, and 2-Second Hold)
+  // 2. Button Engine (Single-Click, Fast Double-Click, Triple-Click, and 2-Second Hold)
   if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
@@ -971,11 +1005,18 @@ void loop() {
         lastClickTime = currentMillis;
 
         if (clickCount == 2) {
+          // Double click triggers lock / unlock
           clickCount = 0;
           if (isDeviceLocked) {
             unlockDevice();
           } else {
             enterLockScreen();
+          }
+        } else if (clickCount >= 3) {
+          // Rapid triple click triggers dizzy reaction!
+          clickCount = 0;
+          if (isDeviceLocked) {
+            setEmotion(EMO_DIZZY);
           }
         }
       }
@@ -1021,7 +1062,8 @@ void loop() {
 
   // 4. UI Display Handlers
   if (isDeviceLocked) {
-    if (currentMillis - lastDisplayDraw >= 40) {
+    // 33 FPS render loop for smooth eye glide
+    if (currentMillis - lastDisplayDraw >= 30) {
       lastDisplayDraw = currentMillis;
       drawEmoFace();
     }
