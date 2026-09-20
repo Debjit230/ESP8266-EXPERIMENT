@@ -24,7 +24,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define OLED_SCL     D4  // GPIO2
 #define IR_RECV_PIN  D2  // TSOP OUT (GPIO4)
 #define BUTTON_PIN   D5  // Mode switch button (Active LOW)
-#define EXTERNAL_LED D1  // Visual indicator LED
+#define EXTERNAL_LED D1  // Visual indicator LED (Active HIGH)
+#define ONBOARD_LED  D0  // NodeMCU on-board LED (GPIO16, Active LOW)
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
@@ -67,9 +68,12 @@ unsigned long alertLedStart = 0;
 const unsigned long LED_ALERT_DURATION = 120;
 
 void triggerLedAlert() {
+  if (isDeviceLocked) return; // Keep all LEDs completely dark when in EMO Lock Screen
+
   alertLedActive = true;
   alertLedStart = millis();
   digitalWrite(EXTERNAL_LED, HIGH);
+  digitalWrite(ONBOARD_LED, LOW); // Active-LOW: LOW turns it ON
 }
 
 // Emotion Engine Definitions
@@ -415,6 +419,7 @@ void configureMode(DeviceMode newMode) {
   wifi_promiscuous_enable(0);
   irrecv.disableIRIn();
   digitalWrite(EXTERNAL_LED, LOW);
+  digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
   alertLedActive = false;
 
   switch (currentMode) {
@@ -477,6 +482,11 @@ void enterLockScreen() {
   isClockModeActive = false;
   resumeMode = currentMode;
 
+  // Turn off both external and on-board LEDs completely
+  digitalWrite(EXTERNAL_LED, LOW);
+  digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
+  alertLedActive = false;
+
   // Only dim if auto-dim was explicitly enabled in web portal
   if (autoDimEnabled) {
     uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
@@ -501,7 +511,7 @@ void unlockDevice() {
   isDeviceLocked = false;
   lastUserActivity = millis();
 
-  // Always keep user manual brightness
+  // Always restore user manual brightness
   setOledBrightness(userBrightness);
 
   display.clearDisplay();
@@ -882,9 +892,13 @@ void syncTimeAtStartup() {
 
 void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
+  pinMode(ONBOARD_LED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(IR_RECV_PIN, INPUT_PULLUP);
+
+  // Set all LEDs to dark off-state by default
   digitalWrite(EXTERNAL_LED, LOW);
+  digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
 
   Serial.begin(115200);
   delay(100);
@@ -900,7 +914,7 @@ void setup() {
   display.clearDisplay();
   display.display();
 
-  // Apply user-configured manual brightness immediately
+  // Apply user manual brightness from EEPROM
   setOledBrightness(userBrightness);
 
   syncTimeAtStartup();
@@ -922,6 +936,7 @@ void loop() {
   if (alertLedActive && (currentMillis - alertLedStart >= LED_ALERT_DURATION)) {
     alertLedActive = false;
     digitalWrite(EXTERNAL_LED, LOW);
+    digitalWrite(ONBOARD_LED, HIGH); // Active-LOW: HIGH turns it OFF
   }
 
   // 2. Button Engine (Single-Click, Fast Double-Click, and 2-Second Hold)
