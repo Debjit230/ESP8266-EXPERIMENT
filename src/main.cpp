@@ -50,6 +50,12 @@ unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
 
+// OLED Hardware Brightness Control
+void setOledBrightness(uint8_t contrast) {
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(contrast);
+}
+
 // Global Non-Blocking Alert LED Controller
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
@@ -80,7 +86,6 @@ void setEmotion(EmoState newEmo) {
   emotionHoldStartTime = millis();
 }
 
-// Helper to check morning greeting window (6:00 AM to 7:30 AM)
 bool isMorningWindow() {
   time_t tNow = time(nullptr);
   struct tm* timeinfo = localtime(&tNow);
@@ -89,7 +94,6 @@ bool isMorningWindow() {
   return false;
 }
 
-// Helper to check late-night sleeping window (11:00 PM to 6:00 AM)
 bool isNightWindow() {
   time_t tNow = time(nullptr);
   struct tm* timeinfo = localtime(&tNow);
@@ -271,7 +275,6 @@ void registerTarget(uint8_t* mac, int rssi) {
 
   triggerLedAlert();
 
-  // Suspicious Squint triggered on ANY detected packet/RSSI
   if (isDeviceLocked) {
     setEmotion(EMO_SUSPICIOUS);
   }
@@ -351,6 +354,9 @@ void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
 
+  // Ensure full brightness is restored when entering any active sensor mode
+  setOledBrightness(255);
+
   server.stop();
   wifi_promiscuous_enable(0);
   irrecv.disableIRIn();
@@ -417,6 +423,9 @@ void enterLockScreen() {
   isClockModeActive = false;
   resumeMode = currentMode;
 
+  // Dim display to soft ambient glow during EMO lock screen
+  setOledBrightness(15);
+
   if (isNightWindow()) {
     currentEmotion = EMO_SLEEP;
   } else if (isMorningWindow()) {
@@ -432,6 +441,10 @@ void enterLockScreen() {
 void unlockDevice() {
   isDeviceLocked = false;
   lastUserActivity = millis();
+
+  // Restore 100% full brightness upon waking
+  setOledBrightness(255);
+
   display.clearDisplay();
   configureMode(resumeMode);
 }
@@ -440,7 +453,6 @@ void unlockDevice() {
 void drawEmoFace() {
   unsigned long now = millis();
 
-  // Reset temporary emotions back to base state after timer expires
   if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP) {
     if (now - emotionHoldStartTime > EMOTION_HOLD_MS) {
       currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
@@ -458,15 +470,13 @@ void drawEmoFace() {
   const int rightEyeBaseX = 74;
   const int eyeBaseY = 17;
 
-  // 1. GOOD MORNING STATE (Warm cheerful greeting banner & happy arched eyes)
+  // 1. GOOD MORNING STATE
   if (currentEmotion == EMO_GOOD_MORNING) {
-    // Arched happy eyes
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
     display.fillRect(leftEyeBaseX, eyeBaseY + 16, eyeW, 14, SSD1306_BLACK);
     display.fillRect(rightEyeBaseX, eyeBaseY + 16, eyeW, 14, SSD1306_BLACK);
 
-    // Good Morning text banner
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(22, 50);
@@ -476,7 +486,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 2. SLEEPING STATE (Late night idle companion with animated floating Zzz)
+  // 2. SLEEPING STATE
   if (currentEmotion == EMO_SLEEP) {
     display.fillRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
     display.fillRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
@@ -495,7 +505,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 3. SHOCKED STATE (Wide round eyes with central black pupils)
+  // 3. SHOCKED STATE
   if (currentEmotion == EMO_SHOCKED) {
     display.fillCircle(leftEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
     display.fillCircle(rightEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
@@ -506,7 +516,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 4. SUSPICIOUS / SQUINT STATE (Angled flattened eyelids on any detected Wi-Fi device)
+  // 4. SUSPICIOUS / SQUINT STATE
   if (currentEmotion == EMO_SUSPICIOUS) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
@@ -518,7 +528,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 5. WINK STATE (Left eye wide, Right eye wink line)
+  // 5. WINK STATE
   if (currentEmotion == EMO_WINK) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY, eyeW, 30, 7, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 4, 2, SSD1306_WHITE);
@@ -527,7 +537,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 6. NORMAL IDLE STATE (Rounded eyes with spontaneous blinks and glances)
+  // 6. NORMAL IDLE STATE
   if (!isBlinking && (now - lastEyeAnim > random(2500, 5000))) {
     isBlinking = true;
     blinkStartTime = now;
@@ -828,11 +838,13 @@ void setup() {
   display.clearDisplay();
   display.display();
 
+  // Full brightness for startup prompts
+  setOledBrightness(255);
+
   syncTimeAtStartup();
 
   lastUserActivity = millis();
 
-  // If boot happens during the morning window, display greeting right away
   if (isMorningWindow()) {
     enterLockScreen();
     setEmotion(EMO_GOOD_MORNING);
@@ -902,6 +914,7 @@ void loop() {
 
         if (isClockModeActive) {
           isClockModeActive = false;
+          setOledBrightness(255); // Restore bright display
           display.clearDisplay();
         } else {
           DeviceMode nextMode;
@@ -922,6 +935,7 @@ void loop() {
       enterLockScreen();
     } else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
+      setOledBrightness(15); // Dim display during clock screensaver
       display.clearDisplay();
     }
   }
@@ -1036,7 +1050,6 @@ void loop() {
           lastMotionDetected = currentMillis;
           triggerLedAlert();
 
-          // Shocked expression on room tripwire motion
           if (isDeviceLocked) {
             setEmotion(EMO_SHOCKED);
           }
@@ -1076,6 +1089,7 @@ void loop() {
             lastUserActivity = currentMillis;
             if (isClockModeActive) {
               isClockModeActive = false;
+              setOledBrightness(255); // Restore bright display
               display.clearDisplay();
             }
           }
