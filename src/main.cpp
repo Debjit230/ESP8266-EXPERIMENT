@@ -20,14 +20,14 @@ extern "C" {
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Hardware Pin Definitions
-#define OLED_SDA      D3  // GPIO0 (OLED SDA)[cite: 1]
-#define OLED_SCL      D4  // GPIO2 (OLED SCL)[cite: 1]
-#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)[cite: 1]
-#define BUTTON_PIN    D5  // Mode switch button (Active LOW)[cite: 1]
+#define OLED_SDA      D3  // GPIO0 (OLED SDA)
+#define OLED_SCL      D4  // GPIO2 (OLED SCL)
+#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)
+#define BUTTON_PIN    D5  // Mode switch button (Active LOW)
 
 // Indicator LEDs Configuration
-#define EXTERNAL_LED  D1  // Main external indicator LED (Active HIGH)[cite: 1]
-#define BOARD_LED     D0  // NodeMCU USB-side LED (GPIO16, Active LOW)[cite: 1]
+#define EXTERNAL_LED  D1  // Main external indicator LED (Active HIGH)
+#define BOARD_LED     D0  // NodeMCU USB-side LED (GPIO16, Active LOW)
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
@@ -51,11 +51,17 @@ const long  gmtOffset_sec     = 19800;
 const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
-// Timers & State Settings
-const unsigned long CLOCK_TIMEOUT_MS = 20000;   // 20 sec inactivity -> Clock screensaver
+// Timers & Lock Settings
+const unsigned long CLOCK_TIMEOUT_MS = 20000;   // 20 sec -> Clock screensaver
+const unsigned long AUTO_LOCK_MS     = 60000;   // 60 sec -> EMO face lock screen
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
-bool isDeviceLocked                  = false;   // Controlled ONLY via manual double-click
+bool isDeviceLocked                  = false;
+
+// Peek Clock (3-Second In-Lock Glance)
+bool isPeekClockActive               = false;
+unsigned long peekClockStartTime     = 0;
+const unsigned long PEEK_CLOCK_DURATION = 3000;
 
 void setOledBrightness(uint8_t contrast) {
   display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -487,6 +493,7 @@ void configureMode(DeviceMode newMode) {
 void enterLockScreen() {
   isDeviceLocked = true;
   isClockModeActive = false;
+  isPeekClockActive = false;
   resumeMode = currentMode;
 
   shutoffLeds();
@@ -513,6 +520,7 @@ void enterLockScreen() {
 
 void unlockDevice() {
   isDeviceLocked = false;
+  isPeekClockActive = false;
   lastUserActivity = millis();
 
   setOledBrightness(userBrightness);
@@ -632,7 +640,7 @@ void drawEmoFace() {
   }
 
   // 7. NORMAL IDLE STATE WITH LERP GLIDE & BLINKING
-  if (!isBlinking && (now - lastEyeTargetShift > random(2400, 4500))) {
+  if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2400, 4500))) {
     lastEyeTargetShift = now;
 
     if (random(0, 100) < 35) {
@@ -936,7 +944,6 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleConfigSave);
 
-  // Initialize OLED with SCL on D4 and SDA on D3[cite: 1]
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.setRotation(2);
@@ -949,7 +956,6 @@ void setup() {
 
   lastUserActivity = millis();
 
-  // If boot happens in the morning window, show greeting on lock screen
   if (isMorningWindow()) {
     enterLockScreen();
     setEmotion(EMO_GOOD_MORNING);
@@ -981,13 +987,14 @@ void loop() {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!holdThresholdMet) {
-        // If on the EMO face, holding for 700ms triggers DIZZY reaction
+        // Condition A: If on the EMO face, holding for 700ms triggers DIZZY!
         if (isDeviceLocked && heldTime >= 700) {
           holdThresholdMet = true;
           clickCount = 0;
+          isPeekClockActive = false;
           setEmotion(EMO_DIZZY);
         }
-        // If in active sensor modes, holding for 2000ms enters AP Config
+        // Condition B: If in active sensor modes, holding for 2000ms triggers AP CONFIG
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
@@ -1010,7 +1017,6 @@ void loop() {
         lastClickTime = currentMillis;
 
         if (clickCount == 2) {
-          // Manual double-click toggles lock screen on/off
           clickCount = 0;
           if (isDeviceLocked) {
             unlockDevice();
@@ -1024,16 +1030,20 @@ void loop() {
     // Single click resolution
     if (clickCount == 1 && (currentMillis - lastClickTime > DOUBLE_CLICK_GAP)) {
       clickCount = 0;
-      if (!isDeviceLocked) {
+
+      if (isDeviceLocked) {
+        // Peek Clock: Show time for 3 seconds while remaining in locked state
+        isPeekClockActive = true;
+        peekClockStartTime = currentMillis;
+        display.clearDisplay();
+      } else {
         lastUserActivity = currentMillis;
 
         if (isClockModeActive) {
-          // Wake back from clock screensaver to active mode
           isClockModeActive = false;
           setOledBrightness(userBrightness);
           display.clearDisplay();
         } else {
-          // Cycle sensor mode
           DeviceMode nextMode;
           if (currentMode == MODE_RADAR)             nextMode = MODE_SCANNER;
           else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
@@ -1046,7 +1056,7 @@ void loop() {
     }
   }
 
-  // 3. Automatic 20-Second Inactivity Clock Screensaver (Only runs when NOT locked)
+  // 3. Automated Inactivity Clock Screensaver (Only runs when NOT locked)
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
     if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
@@ -1060,15 +1070,26 @@ void loop() {
     }
   }
 
+  // Auto-expire 3-second clock peek while locked
+  if (isDeviceLocked && isPeekClockActive && (currentMillis - peekClockStartTime >= PEEK_CLOCK_DURATION)) {
+    isPeekClockActive = false;
+    display.clearDisplay();
+  }
+
   // 4. UI Display Handlers
   if (isDeviceLocked) {
-    // EMO face loop (Manual lock state)
-    if (currentMillis - lastDisplayDraw >= 30) {
-      lastDisplayDraw = currentMillis;
-      drawEmoFace();
+    if (isPeekClockActive) {
+      if (currentMillis - lastDisplayDraw >= 200) {
+        lastDisplayDraw = currentMillis;
+        drawClockUI();
+      }
+    } else {
+      if (currentMillis - lastDisplayDraw >= 30) {
+        lastDisplayDraw = currentMillis;
+        drawEmoFace();
+      }
     }
   } else if (isClockModeActive) {
-    // Automatic 20-second clock screensaver
     if (currentMillis - lastDisplayDraw >= 500) {
       lastDisplayDraw = currentMillis;
       drawClockUI();
