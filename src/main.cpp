@@ -36,13 +36,17 @@ const char* AP_CONFIG_PASS = "12345678";
 // EEPROM Storage Settings
 #define EEPROM_SIZE 128
 #define EEPROM_MAGIC 0x5A
-#define EEPROM_BRIGHT_ADDR   97
-#define EEPROM_AUTODIM_ADDR  98
+#define EEPROM_BRIGHT_ADDR       97
+#define EEPROM_AUTODIM_ADDR      98
+#define EEPROM_AUTOLOCK_EN_ADDR  99
+#define EEPROM_AUTOLOCK_SEC_ADDR 100
 
 char target_ssid[33]     = "";
 char target_password[65] = "";
 uint8_t userBrightness   = 255;
 bool autoDimEnabled      = false;
+bool autoLockEnabled     = true;   // Auto-lock toggle
+uint16_t autoLockSeconds = 60;     // Configurable lock timeout (seconds)
 
 ESP8266WebServer server(80);
 
@@ -52,8 +56,7 @@ const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
 // Timers & Lock Settings
-const unsigned long CLOCK_TIMEOUT_MS = 20000;   // 20 sec -> Clock screensaver
-const unsigned long AUTO_LOCK_MS     = 60000;   // 60 sec -> Auto-lock into EMO face
+const unsigned long CLOCK_TIMEOUT_MS = 20000; // 20 sec -> Clock screensaver
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
@@ -261,15 +264,27 @@ void loadCredentials() {
 
     uint8_t storedDim = EEPROM.read(EEPROM_AUTODIM_ADDR);
     autoDimEnabled = (storedDim == 1);
+
+    uint8_t storedLockEn = EEPROM.read(EEPROM_AUTOLOCK_EN_ADDR);
+    autoLockEnabled = (storedLockEn != 0);
+
+    uint8_t storedLockSec = EEPROM.read(EEPROM_AUTOLOCK_SEC_ADDR);
+    if (storedLockSec >= 15 && storedLockSec <= 300) {
+      autoLockSeconds = storedLockSec;
+    } else {
+      autoLockSeconds = 60;
+    }
   } else {
     strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
     strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
     userBrightness = 255;
     autoDimEnabled = false;
+    autoLockEnabled = true;
+    autoLockSeconds = 60;
   }
 }
 
-void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright, bool newDim) {
+void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright, bool newDim, bool newLockEn, uint16_t newLockSec) {
   EEPROM.write(0, EEPROM_MAGIC);
   for (int i = 0; i < 32; i++) {
     EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
@@ -279,12 +294,16 @@ void saveSettings(const String& newSSID, const String& newPass, uint8_t newBrigh
   }
   EEPROM.write(EEPROM_BRIGHT_ADDR, newBright);
   EEPROM.write(EEPROM_AUTODIM_ADDR, newDim ? 1 : 0);
+  EEPROM.write(EEPROM_AUTOLOCK_EN_ADDR, newLockEn ? 1 : 0);
+  EEPROM.write(EEPROM_AUTOLOCK_SEC_ADDR, (uint8_t)newLockSec);
   EEPROM.commit();
 
   newSSID.toCharArray(target_ssid, sizeof(target_ssid));
   newPass.toCharArray(target_password, sizeof(target_password));
   userBrightness = newBright;
   autoDimEnabled = newDim;
+  autoLockEnabled = newLockEn;
+  autoLockSeconds = newLockSec;
 }
 
 void registerTarget(uint8_t* mac, int rssi) {
@@ -353,10 +372,10 @@ void handleRoot() {
     html += "form{background:#1f1f1f;padding:22px;border-radius:12px;display:inline-block;max-width:340px;width:100%;box-sizing:border-box;}";
     html += "select,input[type=password],input[type=text]{width:100%;padding:10px;margin:8px 0 16px 0;border-radius:6px;border:1px solid #333;background:#2a2a2a;color:#fff;box-sizing:border-box;}";
     html += ".slider-container{margin:15px 0 10px 0;text-align:left;}";
-    html += ".toggle-container{margin:15px 0 20px 0;text-align:left;display:flex;align-items:center;}";
+    html += ".toggle-container{margin:15px 0 12px 0;text-align:left;display:flex;align-items:center;}";
     html += "input[type=range]{width:100%;margin:10px 0;accent-color:#00bcd4;cursor:pointer;}";
     html += "input[type=checkbox]{width:18px;height:18px;margin-right:10px;accent-color:#00bcd4;cursor:pointer;}";
-    html += "input[type=submit]{width:100%;background:#00bcd4;color:#fff;padding:12px;border:none;border-radius:6px;font-weight:bold;font-size:16px;cursor:pointer;}";
+    html += "input[type=submit]{width:100%;background:#00bcd4;color:#fff;padding:12px;border:none;border-radius:6px;font-weight:bold;font-size:16px;cursor:pointer;margin-top:12px;}";
     html += "label{font-size:14px;color:#aaa;display:block;text-align:left;font-weight:bold;}";
     html += ".val-badge{float:right;color:#00bcd4;font-size:14px;}";
     html += "</style></head><body><h2>Sentinel AP Setup</h2>";
@@ -379,14 +398,28 @@ void handleRoot() {
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
 
+    // Manual Brightness Slider
     html += "<div class='slider-container'>";
     html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
     html += "</div>";
 
+    // Auto-Dim Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
     html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
+    html += "</div>";
+
+    // Auto-Lock Toggle
+    html += "<div class='toggle-container'>";
+    html += "<input type='checkbox' id='autolock' name='autolock' value='1'" + String(autoLockEnabled ? " checked" : "") + ">";
+    html += "<label for='autolock' style='font-size:13px;cursor:pointer;color:#eee;'>Enable Auto-Lock (EMO Face)</label>";
+    html += "</div>";
+
+    // Auto-Lock Seconds Slider
+    html += "<div class='slider-container'>";
+    html += "<label>Lock Timeout (sec): <span id='lVal' class='val-badge'>" + String(autoLockSeconds) + "s</span></label>";
+    html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
 
     html += "<input type='submit' value='Save & Reboot'></form></body></html>";
@@ -401,6 +434,8 @@ void handleConfigSave() {
   String reqPass    = server.arg("pass");
   String reqBright  = server.arg("bright");
   bool reqAutoDim   = server.hasArg("autodim");
+  bool reqAutoLock  = server.hasArg("autolock");
+  String reqLockSec = server.arg("locksec");
 
   uint8_t newBright = userBrightness;
   if (reqBright.length() > 0) {
@@ -408,13 +443,20 @@ void handleConfigSave() {
     if (b >= 1 && b <= 255) newBright = (uint8_t)b;
   }
 
+  uint16_t newLockSec = autoLockSeconds;
+  if (reqLockSec.length() > 0) {
+    int ls = reqLockSec.toInt();
+    if (ls >= 15 && ls <= 300) newLockSec = (uint16_t)ls;
+  }
+
   if (reqSSID.length() > 0) {
-    saveSettings(reqSSID, reqPass, newBright, reqAutoDim);
+    saveSettings(reqSSID, reqPass, newBright, reqAutoDim, reqAutoLock, newLockSec);
     setOledBrightness(newBright);
 
     String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
     html += "<h2>Settings Saved!</h2><p>Brightness: " + String(newBright) + "</p>";
-    html += "<p>Auto-dim: " + String(reqAutoDim ? "Enabled" : "Disabled") + "</p><p>Rebooting...</p></body></html>";
+    html += "<p>Auto-Lock: " + String(reqAutoLock ? "ON (" + String(newLockSec) + "s)" : "OFF") + "</p>";
+    html += "<p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
     delay(1500);
     ESP.restart();
@@ -726,7 +768,7 @@ void drawConfigUI() {
   display.setCursor(0, 36);
   display.printf("Bright: %d/255\n", userBrightness);
   display.setCursor(0, 46);
-  display.printf("Auto-Dim: %s\n", autoDimEnabled ? "ON" : "OFF");
+  display.printf("AutoLock: %s (%ds)\n", autoLockEnabled ? "ON" : "OFF", autoLockSeconds);
 
   display.setCursor(0, 56);
   display.println("http://192.168.4.1");
@@ -1058,8 +1100,8 @@ void loop() {
 
   // 3. Automated Locks and Screen Savers
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
-    // Check for 60-second inactivity lock first
-    if (currentMillis - lastUserActivity >= AUTO_LOCK_MS) {
+    // Configurable Auto-Lock Check (if enabled)
+    if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
     } 
     // Otherwise check for 20-second inactivity clock screensaver
