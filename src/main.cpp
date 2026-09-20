@@ -53,7 +53,7 @@ const char* ntpServer         = "pool.ntp.org";
 
 // Timers & Lock Settings
 const unsigned long CLOCK_TIMEOUT_MS = 20000;   // 20 sec -> Clock screensaver
-const unsigned long AUTO_LOCK_MS     = 60000;   // 60 sec -> EMO face lock screen
+const unsigned long AUTO_LOCK_MS     = 60000;   // 60 sec -> Auto-lock into EMO face
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
@@ -1056,9 +1056,14 @@ void loop() {
     }
   }
 
-  // 3. Automated Inactivity Clock Screensaver (Only runs when NOT locked)
+  // 3. Automated Locks and Screen Savers
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
-    if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
+    // Check for 60-second inactivity lock first
+    if (currentMillis - lastUserActivity >= AUTO_LOCK_MS) {
+      enterLockScreen();
+    } 
+    // Otherwise check for 20-second inactivity clock screensaver
+    else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
       if (autoDimEnabled) {
         uint8_t dimLevel = map(userBrightness, 1, 255, 1, 35);
