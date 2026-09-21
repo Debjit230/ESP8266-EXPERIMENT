@@ -30,7 +30,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define BOARD_LED     D0
 
 // AP Config Portal Hotspot Credentials
-const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
+const char* AP_CONFIG_SSID = "COCO-Desk-Buddy";
 const char* AP_CONFIG_PASS = "12345678";
 
 // EEPROM Storage Settings
@@ -59,7 +59,7 @@ bool goodNightEnabled    = true;
 int lastMorningTriggerDay = -1;
 int lastNightTriggerDay   = -1;
 
-// Scheduled Wish Calendar Storage (Matches the OLED screen clock)
+// Scheduled Wish Calendar Storage (Matches OLED screen clock)
 struct WishTimeSchedule {
   uint16_t year;
   uint8_t  month;
@@ -279,6 +279,7 @@ unsigned long lastZzzAnim = 0;
 
 void enterLockScreen();
 void unlockDevice();
+void drawEmoFace();
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -453,7 +454,7 @@ void handleRoot() {
     html += "label{font-size:14px;color:#aaa;display:block;text-align:left;font-weight:bold;}";
     html += ".val-badge{float:right;color:#00bcd4;font-size:14px;}";
     html += "hr{border:0;border-top:1px solid #333;margin:20px 0;}";
-    html += "</style></head><body><h2>Desk-Buddy Setup</h2>";
+    html += "</style></head><body><h2>COCO Setup</h2>";
     html += "<form method='POST' action='/save'>";
     html += "<label>Select Nearby Wi-Fi:</label><select name='ssid'>";
 
@@ -525,7 +526,7 @@ void handleRoot() {
     html += "<input type='submit' value='Save & Apply'></form></body></html>";
     server.send(200, "text/html", html);
   } else {
-    server.send(200, "text/plain", "Desk-Buddy Ready");
+    server.send(200, "text/plain", "COCO Ready");
   }
 }
 
@@ -745,7 +746,6 @@ void drawBirthdayWishUI() {
     display.clearDisplay();
 
     if (activeAlertType == 2) {
-      // Good Night Face: Sleep droop eyes with floating Zzz[cite: 2]
       display.fillRoundRect(24, 31, 30, 14, 7, SSD1306_WHITE);
       display.fillRect(24, 31, 30, 7, SSD1306_BLACK);
       display.fillRoundRect(74, 31, 30, 14, 7, SSD1306_WHITE);
@@ -758,7 +758,6 @@ void drawBirthdayWishUI() {
       if (zPos >= 2) { display.setCursor(106, 14); display.print("Z"); }
       if (zPos >= 3) { display.setCursor(114, 6);  display.print("Z"); }
     } else {
-      // Good Morning or Birthday: Bouncing Heart Loving Face[cite: 5, 7]
       int heartY = 19 + (int)(sin(now * 0.012) * 3.0);
       int heartScale = ((now / 200) % 2 == 0) ? 3 : 2;
 
@@ -850,6 +849,7 @@ void checkScheduledSms() {
   }
 }
 
+// Living Animated Desk-Buddy Face
 void drawEmoFace() {
   unsigned long now = millis();
 
@@ -929,7 +929,8 @@ void drawEmoFace() {
     return;
   }
 
-  if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2400, 4500))) {
+  // Active Natural Blink & Look Dynamics
+  if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2200, 4200))) {
     lastEyeTargetShift = now;
     if (random(0, 100) < 35) {
       isBlinking = true;
@@ -1010,7 +1011,7 @@ void drawConfigUI() {
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   display.setCursor(0, 13);
-  display.println("SSID: ESP-Sentinel");
+  display.println("SSID: COCO-Desk-Buddy");
   display.setCursor(0, 24);
   display.println("Pass: 12345678");
 
@@ -1174,46 +1175,70 @@ void drawDecoderUI() {
   display.display();
 }
 
+// Boot Sequence: "Hi! I am COCO" with Synchronized Strobe, followed by an Animated EMO Face during background Wi-Fi & NTP sync
 void syncTimeAtStartup() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 10);
-  display.println("CONNECTING AP...");
-  display.setCursor(0, 26);
-  display.println(target_ssid[0] ? target_ssid : "[NO AP STORED]");
-  display.setCursor(0, 44);
-  display.println("Hold D5: Setup AP");
-  display.display();
+  const char* introMsg = "Hi! I am COCO";
+  int introPixelWidth = strlen(introMsg) * 12;
+  int scrollPos = SCREEN_WIDTH;
 
-  if (!target_ssid[0]) return;
+  // 1. Scrolling Marquee Intro with LED Blinking
+  while (scrollPos > -introPixelWidth) {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextWrap(false);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(scrollPos, 24);
+    display.print(introMsg);
+    display.display();
 
+    bool ledState = ((scrollPos / 12) % 2 == 0);
+    digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
+    digitalWrite(BOARD_LED, ledState ? LOW : HIGH);
+
+    scrollPos -= 4;
+    delay(25);
+  }
+
+  shutoffLeds();
+
+  if (!target_ssid[0]) {
+    drawEmoFace();
+    return;
+  }
+
+  // 2. Start Wi-Fi connection in the background
   WiFi.mode(WIFI_STA);
   WiFi.begin(target_ssid, target_password);
 
   unsigned long start = millis();
+  unsigned long lastAnimUpdate = 0;
+
+  // Run dynamic animated EMO eyes while waiting for connection
   while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
-    delay(100);
+    if (millis() - lastAnimUpdate >= 30) {
+      lastAnimUpdate = millis();
+      drawEmoFace();
+    }
+
     if (digitalRead(BUTTON_PIN) == LOW) {
       configureMode(MODE_AP_CONFIG);
       return;
     }
+    delay(10);
   }
 
+  // 3. NTP sync while keeping eyes alive on screen
   if (WiFi.status() == WL_CONNECTED) {
-    display.clearDisplay();
-    display.setCursor(0, 18);
-    display.println("Wi-Fi Connected!");
-    display.setCursor(0, 34);
-    display.println("Syncing NTP Time...");
-    display.display();
-
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
     time_t now = time(nullptr);
     start = millis();
     while (now < 100000 && millis() - start < 4000) {
-      delay(200);
+      if (millis() - lastAnimUpdate >= 30) {
+        lastAnimUpdate = millis();
+        drawEmoFace();
+      }
+      delay(10);
       now = time(nullptr);
     }
   }
@@ -1258,7 +1283,7 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Birthday / Greeting Party Strobe / Normal Alert Shutoff
+  // 1. Birthday / Daily Greeting Party Strobe / Normal Alert Shutoff
   if (isSmsAlertActive) {
     bool strobe = ((currentMillis / 100) % 2 == 0);
     digitalWrite(EXTERNAL_LED, strobe ? HIGH : LOW);
@@ -1270,10 +1295,10 @@ void loop() {
     }
   }
 
-  // 2. Exact match check between live display clock and target schedule
+  // 2. Exact match check between live display clock, target schedule, and daily routines
   checkScheduledSms();
 
-  // 3. Auto-expire Birthday Wish after 30 seconds
+  // 3. Auto-expire Birthday / Daily Wish after 30 seconds
   if (isSmsAlertActive && (currentMillis - smsAlertStartTime >= SMS_DISPLAY_DURATION)) {
     isSmsAlertActive = false;
     shutoffLeds();
@@ -1398,7 +1423,7 @@ void loop() {
     display.clearDisplay();
   }
 
-  // 6. UI Handlers: SMS Alert takes TOP PRIORITY over everything
+  // 6. UI Handlers: SMS / Routine Alert takes TOP PRIORITY over everything
   if (isSmsAlertActive) {
     drawBirthdayWishUI();
   } else if (isBannerActive) {
