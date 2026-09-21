@@ -20,14 +20,14 @@ extern "C" {
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Hardware Pin Definitions
-#define OLED_SDA      D3  // GPIO0 (OLED SDA)
-#define OLED_SCL      D4  // GPIO2 (OLED SCL)
-#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)
-#define BUTTON_PIN    D5  // Mode switch button (Active LOW)
+#define OLED_SDA      D3  // GPIO0 (OLED SDA)[cite: 1]
+#define OLED_SCL      D4  // GPIO2 (OLED SCL)[cite: 1]
+#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)[cite: 1]
+#define BUTTON_PIN    D5  // Mode switch button (Active LOW)[cite: 1]
 
 // Indicator LEDs Configuration
-#define EXTERNAL_LED  D1  // Main external indicator LED (Active HIGH)
-#define BOARD_LED     D0  // NodeMCU USB-side LED (GPIO16, Active LOW)
+#define EXTERNAL_LED  D1  // Main external indicator LED (Active HIGH)[cite: 1]
+#define BOARD_LED     D0  // NodeMCU USB-side LED (GPIO16, Active LOW)[cite: 1]
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
@@ -40,8 +40,8 @@ const char* AP_CONFIG_PASS = "12345678";
 #define EEPROM_AUTODIM_ADDR      98
 #define EEPROM_AUTOLOCK_EN_ADDR  99
 #define EEPROM_AUTOLOCK_SEC_ADDR 100
-#define EEPROM_SMS_TIME_ADDR     101 // 4 bytes for uint32_t timestamp
-#define EEPROM_SMS_TEXT_ADDR     105 // 50 bytes for SMS text buffer
+#define EEPROM_SMS_TIME_ADDR     101
+#define EEPROM_SMS_TEXT_ADDR     105
 
 char target_ssid[33]     = "";
 char target_password[65] = "";
@@ -259,7 +259,6 @@ unsigned long blinkStartTime = 0;
 int zzzStep = 0;
 unsigned long lastZzzAnim = 0;
 
-// Forward Declarations
 void setOledBrightness(uint8_t contrast);
 void triggerLedAlert();
 void shutoffLeds();
@@ -298,14 +297,12 @@ void loadCredentials() {
       autoLockSeconds = 60;
     }
 
-    // Load Scheduled SMS timestamp
     uint32_t b0 = EEPROM.read(EEPROM_SMS_TIME_ADDR);
     uint32_t b1 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 1);
     uint32_t b2 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 2);
     uint32_t b3 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 3);
     scheduledSmsEpoch = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 
-    // Load Scheduled SMS text
     for (int i = 0; i < 49; i++) {
       scheduledSmsText[i] = EEPROM.read(EEPROM_SMS_TEXT_ADDR + i);
     }
@@ -493,10 +490,10 @@ void handleRoot() {
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
 
-    // Scheduled SMS / Reminder Section
+    // Scheduled SMS / Reminder Section (Default empty input box)
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Schedule SMS Alert</h3>";
     html += "<label>Message Text (max 48 chars):</label>";
-    html += "<input type='text' name='smstext' maxlength='48' placeholder='e.g. Wake up!' value='" + String(scheduledSmsText) + "'>";
+    html += "<input type='text' name='smstext' maxlength='48' value=''>";
     html += "<label>Alarm Date & Time:</label>";
     html += "<input type='datetime-local' name='smstime'>";
 
@@ -730,22 +727,19 @@ void drawAutoLockBanner() {
   display.display();
 }
 
-// On-screen SMS / Reminder Display
+// On-screen SMS / Reminder Display (Footer text removed)
 void drawSmsAlertUI() {
   display.clearDisplay();
   display.drawRoundRect(2, 2, 124, 60, 6, SSD1306_WHITE);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(16, 8);
+  display.setCursor(16, 10);
   display.print("*** SMS ALERT ***");
-  display.drawLine(6, 18, 121, 18, SSD1306_WHITE);
+  display.drawLine(6, 22, 121, 22, SSD1306_WHITE);
 
-  display.setCursor(8, 24);
+  display.setCursor(10, 32);
   display.print(scheduledSmsText);
-
-  display.setCursor(18, 50);
-  display.print("[Press D5 to exit]");
   display.display();
 }
 
@@ -754,15 +748,14 @@ void checkScheduledSms() {
   if (scheduledSmsEpoch == 0 || isSmsAlertActive) return;
 
   time_t now = time(nullptr);
-  if (now < 100000) return; // NTP not yet synced
+  if (now < 100000) return;
 
-  // Trigger when current time is within or slightly past the target minute
   if ((uint32_t)now >= scheduledSmsEpoch && (uint32_t)now < scheduledSmsEpoch + 120) {
     isSmsAlertActive = true;
     smsAlertStartTime = millis();
     triggerLedAlert();
     setEmotion(EMO_LOVE);
-    clearScheduledSms(); // Clear schedule after triggering
+    clearScheduledSms();
   }
 }
 
@@ -1216,14 +1209,12 @@ void loop() {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!holdThresholdMet) {
-        // Holding for 700ms on the lock screen triggers the Loving Eye expression[cite: 6]
         if (isDeviceLocked && heldTime >= 700) {
           holdThresholdMet = true;
           clickCount = 0;
           isPeekClockActive = false;
           setEmotion(EMO_LOVE);
         }
-        // Holding for 2000ms in active sensor modes opens AP Config Portal
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
