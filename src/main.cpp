@@ -20,14 +20,14 @@ extern "C" {
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Hardware Pin Definitions
-#define OLED_SDA      D3  // GPIO0 (OLED SDA)[cite: 1]
-#define OLED_SCL      D4  // GPIO2 (OLED SCL)[cite: 1]
-#define IR_RECV_PIN   D2  // TSOP OUT (GPIO4)[cite: 1]
-#define BUTTON_PIN    D5  // Mode switch button (Active LOW)[cite: 1]
+#define OLED_SDA      D3
+#define OLED_SCL      D4
+#define IR_RECV_PIN   D2
+#define BUTTON_PIN    D5
 
 // Indicator LEDs Configuration
-#define EXTERNAL_LED  D1  // Main external indicator LED (Active HIGH)[cite: 1]
-#define BOARD_LED     D0  // NodeMCU USB-side LED (GPIO16, Active LOW)[cite: 1]
+#define EXTERNAL_LED  D1
+#define BOARD_LED     D0
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
@@ -50,14 +50,14 @@ bool autoDimEnabled      = false;
 bool autoLockEnabled     = true;
 uint16_t autoLockSeconds = 60;
 
-// Scheduled SMS / Birthday Wish Storage
+// Scheduled Wish / SMS Storage
 uint32_t scheduledSmsEpoch = 0;
 char scheduledSmsText[64]  = "";
 bool isSmsAlertActive      = false;
 unsigned long smsAlertStartTime = 0;
-const unsigned long SMS_DISPLAY_DURATION = 30000; // 30 seconds celebration duration
+const unsigned long SMS_DISPLAY_DURATION = 30000; // 30 seconds
 
-// Marquee Text Animation Parameters
+// Marquee Text State
 int marqueeScrollX = 128;
 unsigned long lastMarqueeShift = 0;
 
@@ -74,12 +74,12 @@ unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
 
-// Peek Clock (3-Second In-Lock Glance)
+// Peek Clock
 bool isPeekClockActive               = false;
 unsigned long peekClockStartTime     = 0;
 const unsigned long PEEK_CLOCK_DURATION = 3000;
 
-// Pop-up Notification Banner for Button Auto-Lock Toggle
+// Banner Notification
 bool isBannerActive                  = false;
 unsigned long bannerStartTime        = 0;
 const unsigned long BANNER_DURATION  = 1200;
@@ -89,7 +89,7 @@ void setOledBrightness(uint8_t contrast) {
   display.ssd1306_command(contrast);
 }
 
-// Global Non-Blocking Alert LED Controller
+// LED Controller
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
 const unsigned long LED_ALERT_DURATION = 120;
@@ -97,7 +97,6 @@ const unsigned long LED_ALERT_DURATION = 120;
 void triggerLedAlert() {
   alertLedActive = true;
   alertLedStart = millis();
-
   digitalWrite(EXTERNAL_LED, HIGH);
   digitalWrite(BOARD_LED, LOW);
 }
@@ -107,7 +106,7 @@ void shutoffLeds() {
   digitalWrite(BOARD_LED, HIGH);
 }
 
-// Emotion Engine Definitions
+// Emotions
 enum EmoState {
   EMO_NORMAL,
   EMO_SUSPICIOUS,
@@ -141,7 +140,7 @@ bool isNightWindow() {
   return false;
 }
 
-// IR Configuration
+// IR
 const uint16_t kCaptureBufferSize = 1024;
 const uint8_t kTimeout = 50;
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kTimeout, true);
@@ -151,9 +150,8 @@ String lastProtocol = "Ready";
 String lastHexCode  = "Press Remote";
 int lastBits        = 0;
 
-// Wi-Fi Radar Structures & Buffers
+// Wi-Fi Radar
 #define MAX_TARGETS 8
-
 struct Target {
   uint8_t mac[6];
   int rssi;
@@ -202,22 +200,19 @@ struct SnifferPacket {
   uint16_t len;
 };
 
-// Wi-Fi AP Scanner Storage
 int totalNetworksFound = 0;
 unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 5000;
 bool scanningInProgress = false;
 
-// Device-Free RF Tripwire Adaptive Motion Sensing
+// Tripwire
 const unsigned long SAMPLE_RATE_MS = 50;
 const float EMA_ALPHA = 0.08;
-
 float baselineRSSI = 0.0;
 bool baselineInitialized = false;
 unsigned long lastSampleTime = 0;
 unsigned long lastMotionDetected = 0;
 const unsigned long ALARM_HOLD_TIME = 1500;
-
 bool isCalibrating = false;
 unsigned long calibrationStartTime = 0;
 float maxNoiseObserved = 0.0;
@@ -227,7 +222,6 @@ float dynamicThreshold = 2.4;
 int waveBuffer[WAVE_POINTS];
 int waveIndex = 0;
 
-// Operational Modes
 enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
@@ -239,7 +233,7 @@ enum DeviceMode {
 DeviceMode currentMode = MODE_RADAR;
 DeviceMode resumeMode  = MODE_RADAR;
 
-// Multi-Click & Long-Press Button Engine
+// Button
 unsigned long lastButtonCheck = 0;
 bool buttonIsPressed = false;
 unsigned long buttonPressStartTime = 0;
@@ -248,12 +242,11 @@ int clickCount = 0;
 unsigned long lastClickTime = 0;
 const unsigned long DOUBLE_CLICK_GAP = 350;
 
-// Desk-Buddy Eye Coordinates & LERP Smoothing
+// Eyes
 float currentEyeX = 0.0;
 float currentEyeY = 0.0;
 float targetEyeX  = 0.0;
 float targetEyeY  = 0.0;
-
 float currentEyeH = 30.0;
 float targetEyeH  = 30.0;
 
@@ -263,17 +256,8 @@ unsigned long blinkStartTime = 0;
 int zzzStep = 0;
 unsigned long lastZzzAnim = 0;
 
-void setOledBrightness(uint8_t contrast);
-void triggerLedAlert();
-void shutoffLeds();
-void setEmotion(EmoState newEmo);
 void enterLockScreen();
 void unlockDevice();
-void drawAutoLockBanner();
-void drawBirthdayWishUI();
-void checkScheduledSms();
-void drawHappyArchedEye(int x, int y, int w);
-void drawSmallHeart(int x, int y);
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -284,11 +268,7 @@ void loadCredentials() {
     target_password[64] = '\0';
 
     uint8_t storedBright = EEPROM.read(EEPROM_BRIGHT_ADDR);
-    if (storedBright >= 1 && storedBright <= 255) {
-      userBrightness = storedBright;
-    } else {
-      userBrightness = 255;
-    }
+    userBrightness = (storedBright >= 1 && storedBright <= 255) ? storedBright : 255;
 
     uint8_t storedDim = EEPROM.read(EEPROM_AUTODIM_ADDR);
     autoDimEnabled = (storedDim == 1);
@@ -297,11 +277,7 @@ void loadCredentials() {
     autoLockEnabled = (storedLockEn != 0);
 
     uint8_t storedLockSec = EEPROM.read(EEPROM_AUTOLOCK_SEC_ADDR);
-    if (storedLockSec >= 15 && storedLockSec <= 300) {
-      autoLockSeconds = storedLockSec;
-    } else {
-      autoLockSeconds = 60;
-    }
+    autoLockSeconds = (storedLockSec >= 15 && storedLockSec <= 300) ? storedLockSec : 60;
 
     uint32_t b0 = EEPROM.read(EEPROM_SMS_TIME_ADDR);
     uint32_t b1 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 1);
@@ -327,12 +303,8 @@ void loadCredentials() {
 
 void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright, bool newDim, bool newLockEn, uint16_t newLockSec) {
   EEPROM.write(0, EEPROM_MAGIC);
-  for (int i = 0; i < 32; i++) {
-    EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
-  }
-  for (int i = 0; i < 64; i++) {
-    EEPROM.write(33 + i, i < (int)newPass.length() ? newPass[i] : 0);
-  }
+  for (int i = 0; i < 32; i++) EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
+  for (int i = 0; i < 64; i++) EEPROM.write(33 + i, i < (int)newPass.length() ? newPass[i] : 0);
   EEPROM.write(EEPROM_BRIGHT_ADDR, newBright);
   EEPROM.write(EEPROM_AUTODIM_ADDR, newDim ? 1 : 0);
   EEPROM.write(EEPROM_AUTOLOCK_EN_ADDR, newLockEn ? 1 : 0);
@@ -370,12 +342,10 @@ void saveScheduledSms(uint32_t epoch, const String& text) {
 
 void clearScheduledSms() {
   scheduledSmsEpoch = 0;
-  scheduledSmsText[0] = '\0';
   EEPROM.write(EEPROM_SMS_TIME_ADDR, 0);
   EEPROM.write(EEPROM_SMS_TIME_ADDR + 1, 0);
   EEPROM.write(EEPROM_SMS_TIME_ADDR + 2, 0);
   EEPROM.write(EEPROM_SMS_TIME_ADDR + 3, 0);
-  EEPROM.write(EEPROM_SMS_TEXT_ADDR, 0);
   EEPROM.commit();
 }
 
@@ -387,7 +357,6 @@ void registerTarget(uint8_t* mac, int rssi) {
       break;
     }
   }
-
   if (targetIndex == -1) {
     for (int i = 0; i < MAX_TARGETS; i++) {
       if (!targets[i].active) {
@@ -396,34 +365,23 @@ void registerTarget(uint8_t* mac, int rssi) {
       }
     }
   }
-
   if (targetIndex == -1) targetIndex = random(0, MAX_TARGETS);
 
   memcpy(targets[targetIndex].mac, mac, 6);
   targets[targetIndex].rssi = rssi;
   targets[targetIndex].lastSeen = millis();
-
-  if (!targets[targetIndex].active) {
-    targets[targetIndex].angle = random(0, 360) * (PI / 180.0);
-  }
+  if (!targets[targetIndex].active) targets[targetIndex].angle = random(0, 360) * (PI / 180.0);
   targets[targetIndex].active = true;
 
   triggerLedAlert();
-
-  if (isDeviceLocked) {
-    setEmotion(EMO_SUSPICIOUS);
-  }
+  if (isDeviceLocked) setEmotion(EMO_SUSPICIOUS);
 }
 
 void snifferCallback(uint8_t *buf, uint16_t len) {
   if (len == 12) return;
-
   struct SnifferPacket *sniffer = (struct SnifferPacket*) buf;
-  int rssi = sniffer->rx_ctrl.rssi;
-
   if (sniffer->buf[0] == 0x40) {
-    uint8_t *srcMac = &sniffer->buf[10];
-    registerTarget(srcMac, rssi);
+    registerTarget(&sniffer->buf[10], sniffer->rx_ctrl.rssi);
   }
 }
 
@@ -472,44 +430,31 @@ void handleRoot() {
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
 
-    // Manual Brightness Slider
     html += "<div class='slider-container'>";
     html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
     html += "</div>";
 
-    // Auto-Dim Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
     html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
     html += "</div>";
 
-    // Auto-Lock Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autolock' name='autolock' value='1'" + String(autoLockEnabled ? " checked" : "") + ">";
     html += "<label for='autolock' style='font-size:13px;cursor:pointer;color:#eee;'>Enable Auto-Lock (EMO Face)</label>";
     html += "</div>";
 
-    // Auto-Lock Seconds Slider
     html += "<div class='slider-container'>";
     html += "<label>Lock Timeout (sec): <span id='lVal' class='val-badge'>" + String(autoLockSeconds) + "s</span></label>";
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
 
-    // Scheduled Birthday Wish Section (Clean empty input)
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Schedule Birthday Wish</h3>";
-    html += "<label>Wish Message (e.g. Happy Birthday Ankita!):</label>";
-    html += "<input type='text' name='smstext' maxlength='60' placeholder='Type your message here...' value=''>";
+    html += "<label>Wish Message:</label>";
+    html += "<input type='text' name='smstext' maxlength='60' placeholder='Happy Birthday Ankita!' value=''>";
     html += "<label>Wish Date & Time:</label>";
     html += "<input type='datetime-local' name='smstime'>";
-
-    if (scheduledSmsEpoch > 0) {
-      time_t t = scheduledSmsEpoch;
-      struct tm* tmInfo = localtime(&t);
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%02d-%02d-%04d %02d:%02d", tmInfo->tm_mday, tmInfo->tm_mon + 1, tmInfo->tm_year + 1900, tmInfo->tm_hour, tmInfo->tm_min);
-      html += "<p style='font-size:12px;color:#00bcd4;margin:4px 0 12px 0;'>Active Scheduled: " + String(buf) + "</p>";
-    }
 
     html += "<input type='submit' value='Save & Reboot'></form></body></html>";
     server.send(200, "text/html", html);
@@ -540,7 +485,6 @@ void handleConfigSave() {
     if (ls >= 15 && ls <= 300) newLockSec = (uint16_t)ls;
   }
 
-  // Parse HTML datetime-local: "YYYY-MM-DDTHH:MM"
   if (reqSmsTime.length() >= 16 && reqSmsText.length() > 0) {
     struct tm targetTm;
     memset(&targetTm, 0, sizeof(struct tm));
@@ -550,10 +494,11 @@ void handleConfigSave() {
     targetTm.tm_hour = reqSmsTime.substring(11, 13).toInt();
     targetTm.tm_min  = reqSmsTime.substring(14, 16).toInt();
     targetTm.tm_sec  = 0;
-    targetTm.tm_isdst = -1;
+    targetTm.tm_isdst = 0;
 
     time_t parsedEpoch = mktime(&targetTm);
     if (parsedEpoch > 0) {
+      parsedEpoch -= gmtOffset_sec;
       saveScheduledSms((uint32_t)parsedEpoch, reqSmsText);
     }
   }
@@ -563,12 +508,7 @@ void handleConfigSave() {
     setOledBrightness(newBright);
 
     String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
-    html += "<h2>Settings Saved!</h2><p>Brightness: " + String(newBright) + "</p>";
-    html += "<p>Auto-Lock: " + String(reqAutoLock ? "ON (" + String(newLockSec) + "s)" : "OFF") + "</p>";
-    if (scheduledSmsEpoch > 0) {
-      html += "<p>Wish Scheduled: " + String(scheduledSmsText) + "</p>";
-    }
-    html += "<p>Rebooting...</p></body></html>";
+    html += "<h2>Settings Saved!</h2><p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
     delay(1500);
     ESP.restart();
@@ -580,7 +520,6 @@ void handleConfigSave() {
 void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
-
   setOledBrightness(userBrightness);
 
   server.stop();
@@ -679,12 +618,10 @@ void unlockDevice() {
   lastUserActivity = millis();
 
   setOledBrightness(userBrightness);
-
   display.clearDisplay();
   configureMode(resumeMode);
 }
 
-// Draw a smooth Desk-Buddy style eye with rounded square outline and inner pupil
 void drawDeskBuddyEye(int x, int y, int w, int h, int pupilShiftX, int pupilShiftY) {
   if (h <= 4) {
     display.fillRoundRect(x, y + 13, w, 4, 2, SSD1306_WHITE);
@@ -706,20 +643,17 @@ void drawDeskBuddyEye(int x, int y, int w, int h, int pupilShiftX, int pupilShif
   display.fillRoundRect(pupilCenterX - (pupilW / 2), pupilCenterY - (pupilH / 2), pupilW, pupilH, 3, SSD1306_BLACK);
 }
 
-// Draw happy curved arched eye (Desk-Buddy inverted crescent)[cite: 6]
 void drawHappyArchedEye(int x, int y, int w) {
   display.fillRoundRect(x, y, w, 18, 9, SSD1306_WHITE);
   display.fillRoundRect(x, y + 6, w, 18, 9, SSD1306_BLACK);
 }
 
-// Draw small heart icon between eyes[cite: 6]
 void drawSmallHeart(int x, int y) {
   display.fillCircle(x - 2, y, 2, SSD1306_WHITE);
   display.fillCircle(x + 2, y, 2, SSD1306_WHITE);
   display.fillTriangle(x - 4, y, x + 4, y, x, y + 5, SSD1306_WHITE);
 }
 
-// Quick banner overlay showing Auto-Lock status
 void drawAutoLockBanner() {
   display.clearDisplay();
   display.drawRoundRect(10, 14, 108, 36, 6, SSD1306_WHITE);
@@ -733,27 +667,27 @@ void drawAutoLockBanner() {
   display.display();
 }
 
-// Smooth scrolling right-to-left birthday wish with alternating loving heart eyes
+// Fixed Birthday Wish UI: Clean scroll with alternating hearts[cite: 7]
 void drawBirthdayWishUI() {
   unsigned long now = millis();
   unsigned long elapsed = now - smsAlertStartTime;
 
-  // Cycle: Scroll text for 4.5s, then show loving heart face for 2.0s
-  unsigned long cycleTime = elapsed % 6500;
+  // 4 seconds marquee text, then 2 seconds heart face
+  unsigned long cycleTime = elapsed % 6000;
 
-  if (cycleTime > 4500) {
-    // Show Loving Heart Face in the celebration loop[cite: 6]
+  if (cycleTime > 4000) {
     display.clearDisplay();
     drawHappyArchedEye(24, 21, 30);
     drawHappyArchedEye(74, 21, 30);
     drawSmallHeart(64, 19);
     display.display();
   } else {
-    // Smooth Marquee scroll right-to-left
-    if (now - lastMarqueeShift >= 30) {
+    int strLen = strlen(scheduledSmsText);
+    int textPixelWidth = (strLen > 0) ? (strLen * 12) : 100;
+
+    if (now - lastMarqueeShift >= 25) {
       lastMarqueeShift = now;
       marqueeScrollX -= 3;
-      int textPixelWidth = strlen(scheduledSmsText) * 12;
       if (marqueeScrollX < -textPixelWidth) {
         marqueeScrollX = SCREEN_WIDTH;
       }
@@ -761,6 +695,7 @@ void drawBirthdayWishUI() {
 
     display.clearDisplay();
     display.setTextSize(2);
+    display.setTextWrap(false);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(marqueeScrollX, 24);
     display.print(scheduledSmsText);
@@ -768,24 +703,22 @@ void drawBirthdayWishUI() {
   }
 }
 
-// Periodic check against real NTP time for scheduled wish trigger
 void checkScheduledSms() {
   if (scheduledSmsEpoch == 0 || isSmsAlertActive) return;
 
   time_t now = time(nullptr);
   if (now < 100000) return;
 
-  // Trigger when current time enters the target minute
-  if ((uint32_t)now >= scheduledSmsEpoch && (uint32_t)now < scheduledSmsEpoch + 120) {
+  if ((uint32_t)now >= scheduledSmsEpoch) {
     isSmsAlertActive = true;
     smsAlertStartTime = millis();
     marqueeScrollX = SCREEN_WIDTH;
+    setOledBrightness(userBrightness); // Wake to full brightness
     triggerLedAlert();
-    clearScheduledSms(); // Consume scheduled wish
+    clearScheduledSms();
   }
 }
 
-// Desk-Buddy Emotional Engine Renderer
 void drawEmoFace() {
   unsigned long now = millis();
 
@@ -806,7 +739,6 @@ void drawEmoFace() {
   const int rightEyeBaseX = 74;
   const int eyeBaseY = 17;
 
-  // 1. LOVING / HAPPY STATE (Arched eyes with heart)[cite: 6]
   if (currentEmotion == EMO_LOVE) {
     drawHappyArchedEye(leftEyeBaseX, eyeBaseY + 4, eyeW);
     drawHappyArchedEye(rightEyeBaseX, eyeBaseY + 4, eyeW);
@@ -815,11 +747,9 @@ void drawEmoFace() {
     return;
   }
 
-  // 2. SLEEPING STATE (Bottom-curved sleepy half circles with floating Zzz)
   if (currentEmotion == EMO_SLEEP) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 14, 7, SSD1306_WHITE);
     display.fillRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 7, SSD1306_BLACK);
-
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 14, 7, SSD1306_WHITE);
     display.fillRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 7, SSD1306_BLACK);
 
@@ -837,37 +767,29 @@ void drawEmoFace() {
     return;
   }
 
-  // 3. SHOCKED STATE (Expanded wide circles with small center pupils)
   if (currentEmotion == EMO_SHOCKED) {
     int lx = leftEyeBaseX + 15;
     int rx = rightEyeBaseX + 15;
     int cy = eyeBaseY + 15;
-
     display.fillCircle(lx, cy, 18, SSD1306_WHITE);
     display.fillCircle(rx, cy, 18, SSD1306_WHITE);
     display.fillCircle(lx, cy, 6, SSD1306_BLACK);
     display.fillCircle(rx, cy, 6, SSD1306_BLACK);
-
     display.display();
     return;
   }
 
-  // 4. SUSPICIOUS / SQUINT STATE
   if (currentEmotion == EMO_SUSPICIOUS) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
-
     display.fillTriangle(leftEyeBaseX, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 14, SSD1306_BLACK);
     display.fillTriangle(rightEyeBaseX, eyeBaseY + 8, rightEyeBaseX + eyeW, eyeBaseY + 8, rightEyeBaseX, eyeBaseY + 14, SSD1306_BLACK);
-
     display.fillRect(leftEyeBaseX + 10, eyeBaseY + 12, 10, 8, SSD1306_BLACK);
     display.fillRect(rightEyeBaseX + 10, eyeBaseY + 12, 10, 8, SSD1306_BLACK);
-
     display.display();
     return;
   }
 
-  // 5. WINK STATE
   if (currentEmotion == EMO_WINK) {
     drawDeskBuddyEye(leftEyeBaseX, eyeBaseY, eyeW, 30, 0, 0);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 4, 2, SSD1306_WHITE);
@@ -875,10 +797,8 @@ void drawEmoFace() {
     return;
   }
 
-  // 6. NORMAL IDLE STATE WITH LERP GLIDE & DYNAMIC PUPILS
   if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2400, 4500))) {
     lastEyeTargetShift = now;
-
     if (random(0, 100) < 35) {
       isBlinking = true;
       blinkStartTime = now;
@@ -1221,7 +1141,7 @@ void loop() {
     display.clearDisplay();
   }
 
-  // 4. Button Engine (Single-Click, Double-Click, Triple-Click, and Context-Aware Hold)
+  // 4. Button Engine
   if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
@@ -1235,14 +1155,12 @@ void loop() {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!holdThresholdMet) {
-        // Holding for 700ms on the lock screen triggers the Loving Eye expression[cite: 6]
         if (isDeviceLocked && heldTime >= 700) {
           holdThresholdMet = true;
           clickCount = 0;
           isPeekClockActive = false;
           setEmotion(EMO_LOVE);
         }
-        // Holding for 2000ms in active sensor modes opens AP Config Portal
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
@@ -1264,13 +1182,11 @@ void loop() {
         clickCount++;
         lastClickTime = currentMillis;
 
-        // Dismiss active birthday wish immediately on manual button press
         if (isSmsAlertActive) {
           isSmsAlertActive = false;
           clickCount = 0;
           display.clearDisplay();
         }
-        // Double-click: Toggle device lock/unlock
         else if (clickCount == 2) {
           clickCount = 0;
           if (isDeviceLocked) {
@@ -1279,7 +1195,6 @@ void loop() {
             enterLockScreen();
           }
         }
-        // Triple-click: Toggle Auto-Lock system ON or OFF!
         else if (clickCount >= 3) {
           clickCount = 0;
           saveAutoLockState(!autoLockEnabled);
@@ -1289,12 +1204,10 @@ void loop() {
       }
     }
 
-    // Single click resolution
     if (clickCount == 1 && (currentMillis - lastClickTime > DOUBLE_CLICK_GAP)) {
       clickCount = 0;
 
       if (isDeviceLocked) {
-        // Peek Clock: Show time for 3 seconds while remaining in locked state
         isPeekClockActive = true;
         peekClockStartTime = currentMillis;
         display.clearDisplay();
@@ -1335,19 +1248,17 @@ void loop() {
     }
   }
 
-  // Auto-expire 3-second clock peek while locked
   if (isDeviceLocked && isPeekClockActive && (currentMillis - peekClockStartTime >= PEEK_CLOCK_DURATION)) {
     isPeekClockActive = false;
     display.clearDisplay();
   }
 
-  // Auto-expire banner notification
   if (isBannerActive && (currentMillis - bannerStartTime >= BANNER_DURATION)) {
     isBannerActive = false;
     display.clearDisplay();
   }
 
-  // 6. UI Display Handlers
+  // 6. UI Handlers: SMS Alert takes TOP PRIORITY over device lock and screensaver
   if (isSmsAlertActive) {
     drawBirthdayWishUI();
   } else if (isBannerActive) {
@@ -1371,7 +1282,7 @@ void loop() {
     }
   }
 
-  // 7. Active & Background Logic Execution
+  // 7. Sensor execution
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
