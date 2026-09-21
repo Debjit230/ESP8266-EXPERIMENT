@@ -36,13 +36,15 @@ const char* AP_CONFIG_PASS = "12345678";
 // EEPROM Storage Settings
 #define EEPROM_SIZE 256
 #define EEPROM_MAGIC 0x5A
-#define EEPROM_BRIGHT_ADDR       97
-#define EEPROM_AUTODIM_ADDR      98
-#define EEPROM_AUTOLOCK_EN_ADDR  99
-#define EEPROM_AUTOLOCK_SEC_ADDR 100
-#define EEPROM_WISH_ARMED_ADDR   101
-#define EEPROM_WISH_DATE_ADDR    102 // 7 bytes for Y, M, D, H, M, S
-#define EEPROM_WISH_TEXT_ADDR    110 // Text buffer
+#define EEPROM_BRIGHT_ADDR          97
+#define EEPROM_AUTODIM_ADDR         98
+#define EEPROM_AUTOLOCK_EN_ADDR     99
+#define EEPROM_AUTOLOCK_SEC_ADDR    100
+#define EEPROM_WISH_ARMED_ADDR      101
+#define EEPROM_WISH_DATE_ADDR       102
+#define EEPROM_WISH_TEXT_ADDR       110
+#define EEPROM_GOOD_MORNING_EN_ADDR 120
+#define EEPROM_GOOD_NIGHT_EN_ADDR   121
 
 char target_ssid[33]     = "";
 char target_password[65] = "";
@@ -50,6 +52,12 @@ uint8_t userBrightness   = 255;
 bool autoDimEnabled      = false;
 bool autoLockEnabled     = true;
 uint16_t autoLockSeconds = 60;
+
+// Daily Routine Toggles
+bool goodMorningEnabled  = true;
+bool goodNightEnabled    = true;
+int lastMorningTriggerDay = -1;
+int lastNightTriggerDay   = -1;
 
 // Scheduled Wish Calendar Storage (Matches the OLED screen clock)
 struct WishTimeSchedule {
@@ -66,6 +74,9 @@ char scheduledSmsText[64]   = "Happy Birthday!";
 bool isSmsAlertActive       = false;
 unsigned long smsAlertStartTime = 0;
 const unsigned long SMS_DISPLAY_DURATION = 30000; // 30 seconds
+
+// Type of active alert: 0 = Birthday/Custom, 1 = Good Morning, 2 = Good Night
+uint8_t activeAlertType = 0;
 
 // Marquee Text State
 int marqueeScrollX = 128;
@@ -289,7 +300,6 @@ void loadCredentials() {
     uint8_t storedLockSec = EEPROM.read(EEPROM_AUTOLOCK_SEC_ADDR);
     autoLockSeconds = (storedLockSec >= 15 && storedLockSec <= 300) ? storedLockSec : 60;
 
-    // Load Scheduled Target Date Components
     wishTarget.armed  = (EEPROM.read(EEPROM_WISH_ARMED_ADDR) == 1);
     wishTarget.year   = (EEPROM.read(EEPROM_WISH_DATE_ADDR) << 8) | EEPROM.read(EEPROM_WISH_DATE_ADDR + 1);
     wishTarget.month  = EEPROM.read(EEPROM_WISH_DATE_ADDR + 2);
@@ -304,6 +314,12 @@ void loadCredentials() {
     if (strlen(scheduledSmsText) == 0) {
       strcpy(scheduledSmsText, "Happy Birthday!");
     }
+
+    uint8_t storedMorning = EEPROM.read(EEPROM_GOOD_MORNING_EN_ADDR);
+    goodMorningEnabled = (storedMorning != 0);
+
+    uint8_t storedNight = EEPROM.read(EEPROM_GOOD_NIGHT_EN_ADDR);
+    goodNightEnabled = (storedNight != 0);
   } else {
     strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
     strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
@@ -313,10 +329,12 @@ void loadCredentials() {
     autoLockSeconds = 60;
     wishTarget.armed = false;
     strcpy(scheduledSmsText, "Happy Birthday!");
+    goodMorningEnabled = true;
+    goodNightEnabled = true;
   }
 }
 
-void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright, bool newDim, bool newLockEn, uint16_t newLockSec) {
+void saveSettings(const String& newSSID, const String& newPass, uint8_t newBright, bool newDim, bool newLockEn, uint16_t newLockSec, bool newMorning, bool newNight) {
   EEPROM.write(0, EEPROM_MAGIC);
   for (int i = 0; i < 32; i++) EEPROM.write(1 + i, i < (int)newSSID.length() ? newSSID[i] : 0);
   for (int i = 0; i < 64; i++) EEPROM.write(33 + i, i < (int)newPass.length() ? newPass[i] : 0);
@@ -324,6 +342,8 @@ void saveSettings(const String& newSSID, const String& newPass, uint8_t newBrigh
   EEPROM.write(EEPROM_AUTODIM_ADDR, newDim ? 1 : 0);
   EEPROM.write(EEPROM_AUTOLOCK_EN_ADDR, newLockEn ? 1 : 0);
   EEPROM.write(EEPROM_AUTOLOCK_SEC_ADDR, (uint8_t)newLockSec);
+  EEPROM.write(EEPROM_GOOD_MORNING_EN_ADDR, newMorning ? 1 : 0);
+  EEPROM.write(EEPROM_GOOD_NIGHT_EN_ADDR, newNight ? 1 : 0);
   EEPROM.commit();
 
   newSSID.toCharArray(target_ssid, sizeof(target_ssid));
@@ -332,6 +352,8 @@ void saveSettings(const String& newSSID, const String& newPass, uint8_t newBrigh
   autoDimEnabled = newDim;
   autoLockEnabled = newLockEn;
   autoLockSeconds = newLockSec;
+  goodMorningEnabled = newMorning;
+  goodNightEnabled = newNight;
 }
 
 void saveAutoLockState(bool enabled) {
@@ -424,7 +446,7 @@ void handleRoot() {
     html += "form{background:#1f1f1f;padding:22px;border-radius:12px;display:inline-block;max-width:340px;width:100%;box-sizing:border-box;}";
     html += "select,input[type=password],input[type=text],input[type=datetime-local]{width:100%;padding:10px;margin:8px 0 16px 0;border-radius:6px;border:1px solid #333;background:#2a2a2a;color:#fff;box-sizing:border-box;}";
     html += ".slider-container{margin:15px 0 10px 0;text-align:left;}";
-    html += ".toggle-container{margin:15px 0 12px 0;text-align:left;display:flex;align-items:center;}";
+    html += ".toggle-container{margin:12px 0;text-align:left;display:flex;align-items:center;}";
     html += "input[type=range]{width:100%;margin:10px 0;accent-color:#00bcd4;cursor:pointer;}";
     html += "input[type=checkbox]{width:18px;height:18px;margin-right:10px;accent-color:#00bcd4;cursor:pointer;}";
     html += "input[type=submit]{width:100%;background:#00bcd4;color:#fff;padding:12px;border:none;border-radius:6px;font-weight:bold;font-size:16px;cursor:pointer;margin-top:12px;}";
@@ -475,7 +497,19 @@ void handleRoot() {
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
 
-    // Birthday Wish Schedule (Matches the display clock)
+    // Daily Routines Section
+    html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Daily Messages</h3>";
+    html += "<div class='toggle-container'>";
+    html += "<input type='checkbox' id='gmorning' name='gmorning' value='1'" + String(goodMorningEnabled ? " checked" : "") + ">";
+    html += "<label for='gmorning' style='font-size:13px;cursor:pointer;color:#eee;'>Good Morning at 7:00 AM</label>";
+    html += "</div>";
+
+    html += "<div class='toggle-container'>";
+    html += "<input type='checkbox' id='gnight' name='gnight' value='1'" + String(goodNightEnabled ? " checked" : "") + ">";
+    html += "<label for='gnight' style='font-size:13px;cursor:pointer;color:#eee;'>Good Night at 10:30 PM</label>";
+    html += "</div>";
+
+    // Birthday Wish Schedule
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Match Clock & Wish</h3>";
     html += "<label>Wish Message:</label>";
     html += "<input type='text' name='smstext' maxlength='60' placeholder='Happy Birthday Ankita!' value=''>";
@@ -488,7 +522,7 @@ void handleRoot() {
       html += "<p style='font-size:13px;color:#00bcd4;margin:4px 0 12px 0;'>Countdown armed for: " + String(buf) + "</p>";
     }
 
-    html += "<input type='submit' value='Save & Arm Wish'></form></body></html>";
+    html += "<input type='submit' value='Save & Apply'></form></body></html>";
     server.send(200, "text/html", html);
   } else {
     server.send(200, "text/plain", "Desk-Buddy Ready");
@@ -496,14 +530,16 @@ void handleRoot() {
 }
 
 void handleConfigSave() {
-  String reqSSID    = server.arg("ssid");
-  String reqPass    = server.arg("pass");
-  String reqBright  = server.arg("bright");
-  bool reqAutoDim   = server.hasArg("autodim");
-  bool reqAutoLock  = server.hasArg("autolock");
-  String reqLockSec = server.arg("locksec");
-  String reqSmsText = server.arg("smstext");
-  String reqSmsTime = server.arg("smstime");
+  String reqSSID     = server.arg("ssid");
+  String reqPass     = server.arg("pass");
+  String reqBright   = server.arg("bright");
+  bool reqAutoDim    = server.hasArg("autodim");
+  bool reqAutoLock   = server.hasArg("autolock");
+  String reqLockSec  = server.arg("locksec");
+  bool reqMorning    = server.hasArg("gmorning");
+  bool reqNight      = server.hasArg("gnight");
+  String reqSmsText  = server.arg("smstext");
+  String reqSmsTime  = server.arg("smstime");
 
   uint8_t newBright = userBrightness;
   if (reqBright.length() > 0) {
@@ -517,7 +553,6 @@ void handleConfigSave() {
     if (ls >= 15 && ls <= 300) newLockSec = (uint16_t)ls;
   }
 
-  // Parse target date and time directly as calendar values (Matches display clock)
   if (reqSmsTime.length() >= 16) {
     uint16_t y  = reqSmsTime.substring(0, 4).toInt();
     uint8_t  m  = reqSmsTime.substring(5, 7).toInt();
@@ -530,11 +565,11 @@ void handleConfigSave() {
   }
 
   if (reqSSID.length() > 0) {
-    saveSettings(reqSSID, reqPass, newBright, reqAutoDim, reqAutoLock, newLockSec);
+    saveSettings(reqSSID, reqPass, newBright, reqAutoDim, reqAutoLock, newLockSec, reqMorning, reqNight);
     setOledBrightness(newBright);
 
     String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
-    html += "<h2>Settings Saved!</h2><p>Syncing display clock & starting countdown. Rebooting...</p></body></html>";
+    html += "<h2>Settings Saved!</h2><p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
     delay(1500);
     ESP.restart();
@@ -699,7 +734,7 @@ void drawAutoLockBanner() {
   display.display();
 }
 
-// 30-second celebration sequence alternating text with bouncy loving face
+// 30-second celebration sequence alternating marquee text with context-aware face
 void drawBirthdayWishUI() {
   unsigned long now = millis();
   unsigned long elapsed = now - smsAlertStartTime;
@@ -709,16 +744,39 @@ void drawBirthdayWishUI() {
   if (cycleTime >= 4500) {
     display.clearDisplay();
 
-    // Heart bounce animation
-    int heartY = 19 + (int)(sin(now * 0.012) * 3.0);
-    int heartScale = ((now / 200) % 2 == 0) ? 3 : 2;
+    if (activeAlertType == 2) {
+      // Good Night Face: Sleep droop eyes with floating Zzz[cite: 2]
+      display.fillRoundRect(24, 31, 30, 14, 7, SSD1306_WHITE);
+      display.fillRect(24, 31, 30, 7, SSD1306_BLACK);
+      display.fillRoundRect(74, 31, 30, 14, 7, SSD1306_WHITE);
+      display.fillRect(74, 31, 30, 7, SSD1306_BLACK);
 
-    drawHappyArchedEye(24, 21, 30);
-    drawHappyArchedEye(74, 21, 30);
-    drawSmallHeart(64, heartY, heartScale);
+      int zPos = (now / 350) % 4;
+      display.setTextSize(1);
+      display.setTextColor(SSD1306_WHITE);
+      if (zPos >= 1) { display.setCursor(98, 22); display.print("z"); }
+      if (zPos >= 2) { display.setCursor(106, 14); display.print("Z"); }
+      if (zPos >= 3) { display.setCursor(114, 6);  display.print("Z"); }
+    } else {
+      // Good Morning or Birthday: Bouncing Heart Loving Face[cite: 5, 7]
+      int heartY = 19 + (int)(sin(now * 0.012) * 3.0);
+      int heartScale = ((now / 200) % 2 == 0) ? 3 : 2;
+
+      drawHappyArchedEye(24, 21, 30);
+      drawHappyArchedEye(74, 21, 30);
+      drawSmallHeart(64, heartY, heartScale);
+    }
     display.display();
   } else {
-    const char* renderStr = (scheduledSmsText[0] != '\0') ? scheduledSmsText : "Happy Birthday!";
+    const char* renderStr;
+    if (activeAlertType == 1) {
+      renderStr = "Good Morning!";
+    } else if (activeAlertType == 2) {
+      renderStr = "Good Night & Sweet Dreams!";
+    } else {
+      renderStr = (scheduledSmsText[0] != '\0') ? scheduledSmsText : "Happy Birthday!";
+    }
+
     int textPixelWidth = strlen(renderStr) * 12;
 
     if (now - lastMarqueeShift >= 25) {
@@ -739,28 +797,56 @@ void drawBirthdayWishUI() {
   }
 }
 
-// Compares the EXACT clock displayed on the screen with the target wish time
+// Checks Clock for Birthday Wishes & Daily Routines (7:00 AM & 10:30 PM)
 void checkScheduledSms() {
-  if (!wishTarget.armed || isSmsAlertActive) return;
+  if (isSmsAlertActive) return;
 
   time_t now = time(nullptr);
-  if (now < 100000) return; // Wait until time is synced
+  if (now < 100000) return;
 
-  // Get local breakdown (exactly what drawClockUI displays on screen)
   struct tm* t = localtime(&now);
 
-  // Exact calendar match down to year, month, day, hour, and minute
-  if ((t->tm_year + 1900) == (int)wishTarget.year &&
-      (t->tm_mon + 1)     == (int)wishTarget.month &&
-      t->tm_mday          == (int)wishTarget.day &&
-      t->tm_hour          == (int)wishTarget.hour &&
-      t->tm_min           == (int)wishTarget.minute) {
-    
-    isSmsAlertActive = true;
-    smsAlertStartTime = millis();
-    marqueeScrollX = SCREEN_WIDTH;
-    setOledBrightness(userBrightness);
-    clearScheduledWish(); // Disarm after trigger
+  // 1. Daily Good Morning Check (07:00 AM)
+  if (goodMorningEnabled && t->tm_hour == 7 && t->tm_min == 0) {
+    if (lastMorningTriggerDay != t->tm_mday) {
+      lastMorningTriggerDay = t->tm_mday;
+      activeAlertType = 1;
+      isSmsAlertActive = true;
+      smsAlertStartTime = millis();
+      marqueeScrollX = SCREEN_WIDTH;
+      setOledBrightness(userBrightness);
+      return;
+    }
+  }
+
+  // 2. Daily Good Night Check (10:30 PM = 22:30)
+  if (goodNightEnabled && t->tm_hour == 22 && t->tm_min == 30) {
+    if (lastNightTriggerDay != t->tm_mday) {
+      lastNightTriggerDay = t->tm_mday;
+      activeAlertType = 2;
+      isSmsAlertActive = true;
+      smsAlertStartTime = millis();
+      marqueeScrollX = SCREEN_WIDTH;
+      setOledBrightness(userBrightness);
+      return;
+    }
+  }
+
+  // 3. Custom Scheduled Calendar Wish Check
+  if (wishTarget.armed) {
+    if ((t->tm_year + 1900) == (int)wishTarget.year &&
+        (t->tm_mon + 1)     == (int)wishTarget.month &&
+        t->tm_mday          == (int)wishTarget.day &&
+        t->tm_hour          == (int)wishTarget.hour &&
+        t->tm_min           == (int)wishTarget.minute) {
+      
+      activeAlertType = 0;
+      isSmsAlertActive = true;
+      smsAlertStartTime = millis();
+      marqueeScrollX = SCREEN_WIDTH;
+      setOledBrightness(userBrightness);
+      clearScheduledWish();
+    }
   }
 }
 
@@ -878,7 +964,6 @@ void drawEmoFace() {
   display.display();
 }
 
-// Clock UI rendered on the display screensaver
 void drawClockUI() {
   time_t now = time(nullptr);
   struct tm* timeinfo = localtime(&now);
@@ -1173,7 +1258,7 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Birthday Wish Strobe / Normal Alert Shutoff
+  // 1. Birthday / Greeting Party Strobe / Normal Alert Shutoff
   if (isSmsAlertActive) {
     bool strobe = ((currentMillis / 100) % 2 == 0);
     digitalWrite(EXTERNAL_LED, strobe ? HIGH : LOW);
