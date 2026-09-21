@@ -34,12 +34,14 @@ const char* AP_CONFIG_SSID = "ESP-Sentinel-Config";
 const char* AP_CONFIG_PASS = "12345678";
 
 // EEPROM Storage Settings
-#define EEPROM_SIZE 128
+#define EEPROM_SIZE 256
 #define EEPROM_MAGIC 0x5A
 #define EEPROM_BRIGHT_ADDR       97
 #define EEPROM_AUTODIM_ADDR      98
 #define EEPROM_AUTOLOCK_EN_ADDR  99
 #define EEPROM_AUTOLOCK_SEC_ADDR 100
+#define EEPROM_SMS_TIME_ADDR     101 // 4 bytes for uint32_t timestamp
+#define EEPROM_SMS_TEXT_ADDR     105 // 50 bytes for SMS text buffer
 
 char target_ssid[33]     = "";
 char target_password[65] = "";
@@ -47,6 +49,13 @@ uint8_t userBrightness   = 255;
 bool autoDimEnabled      = false;
 bool autoLockEnabled     = true;
 uint16_t autoLockSeconds = 60;
+
+// Scheduled SMS / Reminder Storage
+uint32_t scheduledSmsEpoch = 0;
+char scheduledSmsText[50]  = "";
+bool isSmsAlertActive      = false;
+unsigned long smsAlertStartTime = 0;
+const unsigned long SMS_DISPLAY_DURATION = 15000; // 15 seconds on screen
 
 ESP8266WebServer server(80);
 
@@ -65,6 +74,11 @@ bool isDeviceLocked                  = false;
 bool isPeekClockActive               = false;
 unsigned long peekClockStartTime     = 0;
 const unsigned long PEEK_CLOCK_DURATION = 3000;
+
+// Pop-up Notification Banner for Button Auto-Lock Toggle
+bool isBannerActive                  = false;
+unsigned long bannerStartTime        = 0;
+const unsigned long BANNER_DURATION  = 1200;
 
 void setOledBrightness(uint8_t contrast) {
   display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -96,13 +110,12 @@ enum EmoState {
   EMO_SHOCKED,
   EMO_WINK,
   EMO_SLEEP,
-  EMO_HAPPY,
-  EMO_DIZZY
+  EMO_LOVE
 };
 
 EmoState currentEmotion = EMO_NORMAL;
 unsigned long emotionHoldStartTime = 0;
-const unsigned long EMOTION_HOLD_MS = 2200;
+const unsigned long EMOTION_HOLD_MS = 2500;
 
 void setEmotion(EmoState newEmo) {
   currentEmotion = newEmo;
@@ -245,7 +258,17 @@ bool isBlinking = false;
 unsigned long blinkStartTime = 0;
 int zzzStep = 0;
 unsigned long lastZzzAnim = 0;
-float dizzyAngle = 0.0;
+
+// Forward Declarations
+void setOledBrightness(uint8_t contrast);
+void triggerLedAlert();
+void shutoffLeds();
+void setEmotion(EmoState newEmo);
+void enterLockScreen();
+void unlockDevice();
+void drawAutoLockBanner();
+void drawSmsAlertUI();
+void checkScheduledSms();
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -274,6 +297,19 @@ void loadCredentials() {
     } else {
       autoLockSeconds = 60;
     }
+
+    // Load Scheduled SMS timestamp
+    uint32_t b0 = EEPROM.read(EEPROM_SMS_TIME_ADDR);
+    uint32_t b1 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 1);
+    uint32_t b2 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 2);
+    uint32_t b3 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 3);
+    scheduledSmsEpoch = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+
+    // Load Scheduled SMS text
+    for (int i = 0; i < 49; i++) {
+      scheduledSmsText[i] = EEPROM.read(EEPROM_SMS_TEXT_ADDR + i);
+    }
+    scheduledSmsText[49] = '\0';
   } else {
     strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
     strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
@@ -281,6 +317,8 @@ void loadCredentials() {
     autoDimEnabled = false;
     autoLockEnabled = true;
     autoLockSeconds = 60;
+    scheduledSmsEpoch = 0;
+    scheduledSmsText[0] = '\0';
   }
 }
 
@@ -304,6 +342,38 @@ void saveSettings(const String& newSSID, const String& newPass, uint8_t newBrigh
   autoDimEnabled = newDim;
   autoLockEnabled = newLockEn;
   autoLockSeconds = newLockSec;
+}
+
+void saveAutoLockState(bool enabled) {
+  EEPROM.write(EEPROM_AUTOLOCK_EN_ADDR, enabled ? 1 : 0);
+  EEPROM.commit();
+  autoLockEnabled = enabled;
+}
+
+void saveScheduledSms(uint32_t epoch, const String& text) {
+  scheduledSmsEpoch = epoch;
+  EEPROM.write(EEPROM_SMS_TIME_ADDR,     (epoch >> 24) & 0xFF);
+  EEPROM.write(EEPROM_SMS_TIME_ADDR + 1, (epoch >> 16) & 0xFF);
+  EEPROM.write(EEPROM_SMS_TIME_ADDR + 2, (epoch >> 8) & 0xFF);
+  EEPROM.write(EEPROM_SMS_TIME_ADDR + 3, epoch & 0xFF);
+
+  text.toCharArray(scheduledSmsText, sizeof(scheduledSmsText));
+  for (int i = 0; i < 49; i++) {
+    EEPROM.write(EEPROM_SMS_TEXT_ADDR + i, i < (int)text.length() ? text[i] : 0);
+  }
+  EEPROM.write(EEPROM_SMS_TEXT_ADDR + 49, 0);
+  EEPROM.commit();
+}
+
+void clearScheduledSms() {
+  scheduledSmsEpoch = 0;
+  scheduledSmsText[0] = '\0';
+  EEPROM.write(EEPROM_SMS_TIME_ADDR, 0);
+  EEPROM.write(EEPROM_SMS_TIME_ADDR + 1, 0);
+  EEPROM.write(EEPROM_SMS_TIME_ADDR + 2, 0);
+  EEPROM.write(EEPROM_SMS_TIME_ADDR + 3, 0);
+  EEPROM.write(EEPROM_SMS_TEXT_ADDR, 0);
+  EEPROM.commit();
 }
 
 void registerTarget(uint8_t* mac, int rssi) {
@@ -370,7 +440,7 @@ void handleRoot() {
     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>body{font-family:Arial,sans-serif;background:#121212;color:#eee;text-align:center;padding:20px;}";
     html += "form{background:#1f1f1f;padding:22px;border-radius:12px;display:inline-block;max-width:340px;width:100%;box-sizing:border-box;}";
-    html += "select,input[type=password],input[type=text]{width:100%;padding:10px;margin:8px 0 16px 0;border-radius:6px;border:1px solid #333;background:#2a2a2a;color:#fff;box-sizing:border-box;}";
+    html += "select,input[type=password],input[type=text],input[type=datetime-local]{width:100%;padding:10px;margin:8px 0 16px 0;border-radius:6px;border:1px solid #333;background:#2a2a2a;color:#fff;box-sizing:border-box;}";
     html += ".slider-container{margin:15px 0 10px 0;text-align:left;}";
     html += ".toggle-container{margin:15px 0 12px 0;text-align:left;display:flex;align-items:center;}";
     html += "input[type=range]{width:100%;margin:10px 0;accent-color:#00bcd4;cursor:pointer;}";
@@ -378,6 +448,7 @@ void handleRoot() {
     html += "input[type=submit]{width:100%;background:#00bcd4;color:#fff;padding:12px;border:none;border-radius:6px;font-weight:bold;font-size:16px;cursor:pointer;margin-top:12px;}";
     html += "label{font-size:14px;color:#aaa;display:block;text-align:left;font-weight:bold;}";
     html += ".val-badge{float:right;color:#00bcd4;font-size:14px;}";
+    html += "hr{border:0;border-top:1px solid #333;margin:20px 0;}";
     html += "</style></head><body><h2>Sentinel AP Setup</h2>";
     html += "<form method='POST' action='/save'>";
     html += "<label>Select Nearby Wi-Fi:</label><select name='ssid'>";
@@ -398,25 +469,44 @@ void handleRoot() {
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
 
+    // Manual Brightness Slider
     html += "<div class='slider-container'>";
     html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
     html += "</div>";
 
+    // Auto-Dim Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
     html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
     html += "</div>";
 
+    // Auto-Lock Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autolock' name='autolock' value='1'" + String(autoLockEnabled ? " checked" : "") + ">";
     html += "<label for='autolock' style='font-size:13px;cursor:pointer;color:#eee;'>Enable Auto-Lock (EMO Face)</label>";
     html += "</div>";
 
+    // Auto-Lock Seconds Slider
     html += "<div class='slider-container'>";
     html += "<label>Lock Timeout (sec): <span id='lVal' class='val-badge'>" + String(autoLockSeconds) + "s</span></label>";
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
+
+    // Scheduled SMS / Reminder Section
+    html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Schedule SMS Alert</h3>";
+    html += "<label>Message Text (max 48 chars):</label>";
+    html += "<input type='text' name='smstext' maxlength='48' placeholder='e.g. Wake up!' value='" + String(scheduledSmsText) + "'>";
+    html += "<label>Alarm Date & Time:</label>";
+    html += "<input type='datetime-local' name='smstime'>";
+
+    if (scheduledSmsEpoch > 0) {
+      time_t t = scheduledSmsEpoch;
+      struct tm* tmInfo = localtime(&t);
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%02d-%02d-%04d %02d:%02d", tmInfo->tm_mday, tmInfo->tm_mon + 1, tmInfo->tm_year + 1900, tmInfo->tm_hour, tmInfo->tm_min);
+      html += "<p style='font-size:12px;color:#00bcd4;margin:4px 0 12px 0;'>Scheduled: " + String(buf) + "</p>";
+    }
 
     html += "<input type='submit' value='Save & Reboot'></form></body></html>";
     server.send(200, "text/html", html);
@@ -432,6 +522,8 @@ void handleConfigSave() {
   bool reqAutoDim   = server.hasArg("autodim");
   bool reqAutoLock  = server.hasArg("autolock");
   String reqLockSec = server.arg("locksec");
+  String reqSmsText = server.arg("smstext");
+  String reqSmsTime = server.arg("smstime");
 
   uint8_t newBright = userBrightness;
   if (reqBright.length() > 0) {
@@ -445,6 +537,24 @@ void handleConfigSave() {
     if (ls >= 15 && ls <= 300) newLockSec = (uint16_t)ls;
   }
 
+  // Parse HTML datetime-local: "YYYY-MM-DDTHH:MM"
+  if (reqSmsTime.length() >= 16) {
+    struct tm targetTm;
+    memset(&targetTm, 0, sizeof(struct tm));
+    targetTm.tm_year = reqSmsTime.substring(0, 4).toInt() - 1900;
+    targetTm.tm_mon  = reqSmsTime.substring(5, 7).toInt() - 1;
+    targetTm.tm_mday = reqSmsTime.substring(8, 10).toInt();
+    targetTm.tm_hour = reqSmsTime.substring(11, 13).toInt();
+    targetTm.tm_min  = reqSmsTime.substring(14, 16).toInt();
+    targetTm.tm_sec  = 0;
+    targetTm.tm_isdst = -1;
+
+    time_t parsedEpoch = mktime(&targetTm);
+    if (parsedEpoch > 0) {
+      saveScheduledSms((uint32_t)parsedEpoch, reqSmsText);
+    }
+  }
+
   if (reqSSID.length() > 0) {
     saveSettings(reqSSID, reqPass, newBright, reqAutoDim, reqAutoLock, newLockSec);
     setOledBrightness(newBright);
@@ -452,6 +562,9 @@ void handleConfigSave() {
     String html = "<html><body style='background:#121212;color:#eee;text-align:center;padding:40px;font-family:Arial;'>";
     html += "<h2>Settings Saved!</h2><p>Brightness: " + String(newBright) + "</p>";
     html += "<p>Auto-Lock: " + String(reqAutoLock ? "ON (" + String(newLockSec) + "s)" : "OFF") + "</p>";
+    if (scheduledSmsEpoch > 0) {
+      html += "<p>SMS Scheduled: " + String(scheduledSmsText) + "</p>";
+    }
     html += "<p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
     delay(1500);
@@ -547,7 +660,7 @@ void enterLockScreen() {
   if (isNightWindow()) {
     currentEmotion = EMO_SLEEP;
   } else if (isMorningWindow()) {
-    setEmotion(EMO_HAPPY);
+    setEmotion(EMO_LOVE);
   } else {
     currentEmotion = EMO_NORMAL;
   }
@@ -559,6 +672,7 @@ void enterLockScreen() {
 void unlockDevice() {
   isDeviceLocked = false;
   isPeekClockActive = false;
+  isSmsAlertActive = false;
   lastUserActivity = millis();
 
   setOledBrightness(userBrightness);
@@ -577,10 +691,8 @@ void drawDeskBuddyEye(int x, int y, int w, int h, int pupilShiftX, int pupilShif
   int cornerRadius = 9;
   if (h < 18) cornerRadius = h / 2;
 
-  // Outer rounded square body
   display.fillRoundRect(x, y, w, h, cornerRadius, SSD1306_WHITE);
 
-  // Inner cutout pupil (creates the stylized hollow eye look)
   int pupilW = 10;
   int pupilH = (h > 16) ? 10 : (h - 6);
   if (pupilH < 3) pupilH = 3;
@@ -591,7 +703,7 @@ void drawDeskBuddyEye(int x, int y, int w, int h, int pupilShiftX, int pupilShif
   display.fillRoundRect(pupilCenterX - (pupilW / 2), pupilCenterY - (pupilH / 2), pupilW, pupilH, 3, SSD1306_BLACK);
 }
 
-// Draw happy curved arched eye (inverted crescent)
+// Draw happy curved arched eye (Desk-Buddy inverted crescent)
 void drawHappyArchedEye(int x, int y, int w) {
   display.fillRoundRect(x, y, w, 18, 9, SSD1306_WHITE);
   display.fillRoundRect(x, y + 6, w, 18, 9, SSD1306_BLACK);
@@ -604,16 +716,62 @@ void drawSmallHeart(int x, int y) {
   display.fillTriangle(x - 4, y, x + 4, y, x, y + 5, SSD1306_WHITE);
 }
 
+// Quick banner overlay showing Auto-Lock status
+void drawAutoLockBanner() {
+  display.clearDisplay();
+  display.drawRoundRect(10, 14, 108, 36, 6, SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(24, 20);
+  display.print("AUTO-LOCK:");
+  display.setTextSize(2);
+  display.setCursor(44, 32);
+  display.print(autoLockEnabled ? "ON" : "OFF");
+  display.display();
+}
+
+// On-screen SMS / Reminder Display
+void drawSmsAlertUI() {
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 60, 6, SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setCursor(16, 8);
+  display.print("*** SMS ALERT ***");
+  display.drawLine(6, 18, 121, 18, SSD1306_WHITE);
+
+  display.setCursor(8, 24);
+  display.print(scheduledSmsText);
+
+  display.setCursor(18, 50);
+  display.print("[Press D5 to exit]");
+  display.display();
+}
+
+// Periodic check against real NTP time for scheduled SMS trigger
+void checkScheduledSms() {
+  if (scheduledSmsEpoch == 0 || isSmsAlertActive) return;
+
+  time_t now = time(nullptr);
+  if (now < 100000) return; // NTP not yet synced
+
+  // Trigger when current time is within or slightly past the target minute
+  if ((uint32_t)now >= scheduledSmsEpoch && (uint32_t)now < scheduledSmsEpoch + 120) {
+    isSmsAlertActive = true;
+    smsAlertStartTime = millis();
+    triggerLedAlert();
+    setEmotion(EMO_LOVE);
+    clearScheduledSms(); // Clear schedule after triggering
+  }
+}
+
 // Desk-Buddy Emotional Engine Renderer
 void drawEmoFace() {
   unsigned long now = millis();
 
-  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP && currentEmotion != EMO_DIZZY) {
+  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP) {
     if (now - emotionHoldStartTime > EMOTION_HOLD_MS) {
-      currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
-    }
-  } else if (currentEmotion == EMO_DIZZY) {
-    if (now - emotionHoldStartTime > 2500) {
       currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
     }
   } else {
@@ -629,8 +787,8 @@ void drawEmoFace() {
   const int rightEyeBaseX = 74;
   const int eyeBaseY = 17;
 
-  // 1. HAPPY / GOOD MORNING STATE (Arched eyes with heart)
-  if (currentEmotion == EMO_HAPPY) {
+  // 1. LOVING / HAPPY STATE (Arched eyes with heart)[cite: 6]
+  if (currentEmotion == EMO_LOVE) {
     drawHappyArchedEye(leftEyeBaseX, eyeBaseY + 4, eyeW);
     drawHappyArchedEye(rightEyeBaseX, eyeBaseY + 4, eyeW);
     drawSmallHeart(64, eyeBaseY + 2);
@@ -660,25 +818,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 3. DIZZY STATE (Concentric spinning spirals)
-  if (currentEmotion == EMO_DIZZY) {
-    dizzyAngle += 0.35;
-    int lx = leftEyeBaseX + 15;
-    int rx = rightEyeBaseX + 15;
-    int cy = eyeBaseY + 15;
-
-    for (int r = 4; r <= 16; r += 4) {
-      display.drawCircle(lx, cy, r, SSD1306_WHITE);
-      display.drawCircle(rx, cy, r, SSD1306_WHITE);
-    }
-    display.drawLine(lx + cos(dizzyAngle) * 16, cy + sin(dizzyAngle) * 16, lx - cos(dizzyAngle) * 16, cy - sin(dizzyAngle) * 16, SSD1306_WHITE);
-    display.drawLine(rx + cos(dizzyAngle) * 16, cy + sin(dizzyAngle) * 16, rx - cos(dizzyAngle) * 16, cy - sin(dizzyAngle) * 16, SSD1306_WHITE);
-
-    display.display();
-    return;
-  }
-
-  // 4. SHOCKED STATE (Expanded wide circles with small center pupils)
+  // 3. SHOCKED STATE (Expanded wide circles with small center pupils)
   if (currentEmotion == EMO_SHOCKED) {
     int lx = leftEyeBaseX + 15;
     int rx = rightEyeBaseX + 15;
@@ -693,7 +833,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 5. SUSPICIOUS / SQUINT STATE
+  // 4. SUSPICIOUS / SQUINT STATE
   if (currentEmotion == EMO_SUSPICIOUS) {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
@@ -708,7 +848,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 6. WINK STATE
+  // 5. WINK STATE
   if (currentEmotion == EMO_WINK) {
     drawDeskBuddyEye(leftEyeBaseX, eyeBaseY, eyeW, 30, 0, 0);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 4, 2, SSD1306_WHITE);
@@ -716,7 +856,7 @@ void drawEmoFace() {
     return;
   }
 
-  // 7. NORMAL IDLE STATE WITH LERP GLIDE & DYNAMIC PUPILS
+  // 6. NORMAL IDLE STATE WITH LERP GLIDE & DYNAMIC PUPILS
   if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2400, 4500))) {
     lastEyeTargetShift = now;
 
@@ -744,7 +884,6 @@ void drawEmoFace() {
   int rx = constrain(rightEyeBaseX + (int)currentEyeX, 54, 96);
   int y  = constrain(eyeBaseY + (int)currentEyeY + (30 - renderH) / 2, 6, 32);
 
-  // Pupil moves proportionally to the glance direction
   int pupilOffsetX = constrain((int)(currentEyeX * 0.5), -4, 4);
   int pupilOffsetY = constrain((int)(currentEyeY * 0.5), -3, 3);
 
@@ -1039,7 +1178,7 @@ void setup() {
 
   if (isMorningWindow()) {
     enterLockScreen();
-    setEmotion(EMO_HAPPY);
+    setEmotion(EMO_LOVE);
   } else if (currentMode != MODE_AP_CONFIG) {
     configureMode(MODE_RADAR);
   }
@@ -1054,7 +1193,16 @@ void loop() {
     shutoffLeds();
   }
 
-  // 2. Button Engine (Single-Click, Fast Double-Click, and Context-Aware Hold)
+  // 2. Periodic NTP check for scheduled message alert
+  checkScheduledSms();
+
+  // 3. Auto-expire SMS pop-up after 15 seconds
+  if (isSmsAlertActive && (currentMillis - smsAlertStartTime >= SMS_DISPLAY_DURATION)) {
+    isSmsAlertActive = false;
+    display.clearDisplay();
+  }
+
+  // 4. Button Engine (Single-Click, Double-Click, Triple-Click, and Context-Aware Hold)
   if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
@@ -1068,12 +1216,14 @@ void loop() {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!holdThresholdMet) {
+        // Holding for 700ms on the lock screen triggers the Loving Eye expression[cite: 6]
         if (isDeviceLocked && heldTime >= 700) {
           holdThresholdMet = true;
           clickCount = 0;
           isPeekClockActive = false;
-          setEmotion(EMO_DIZZY);
+          setEmotion(EMO_LOVE);
         }
+        // Holding for 2000ms in active sensor modes opens AP Config Portal
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
@@ -1095,7 +1245,14 @@ void loop() {
         clickCount++;
         lastClickTime = currentMillis;
 
-        if (clickCount == 2) {
+        // Dismiss active SMS alert immediately on click
+        if (isSmsAlertActive) {
+          isSmsAlertActive = false;
+          clickCount = 0;
+          display.clearDisplay();
+        }
+        // Double-click: Toggle device lock/unlock
+        else if (clickCount == 2) {
           clickCount = 0;
           if (isDeviceLocked) {
             unlockDevice();
@@ -1103,13 +1260,22 @@ void loop() {
             enterLockScreen();
           }
         }
+        // Triple-click: Toggle Auto-Lock system ON or OFF!
+        else if (clickCount >= 3) {
+          clickCount = 0;
+          saveAutoLockState(!autoLockEnabled);
+          isBannerActive = true;
+          bannerStartTime = currentMillis;
+        }
       }
     }
 
+    // Single click resolution
     if (clickCount == 1 && (currentMillis - lastClickTime > DOUBLE_CLICK_GAP)) {
       clickCount = 0;
 
       if (isDeviceLocked) {
+        // Peek Clock: Show time for 3 seconds while remaining in locked state
         isPeekClockActive = true;
         peekClockStartTime = currentMillis;
         display.clearDisplay();
@@ -1133,7 +1299,7 @@ void loop() {
     }
   }
 
-  // 3. Automated Locks and Screen Savers
+  // 5. Automated Locks and Screen Savers
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
     if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
@@ -1156,8 +1322,18 @@ void loop() {
     display.clearDisplay();
   }
 
-  // 4. UI Display Handlers
-  if (isDeviceLocked) {
+  // Auto-expire banner notification
+  if (isBannerActive && (currentMillis - bannerStartTime >= BANNER_DURATION)) {
+    isBannerActive = false;
+    display.clearDisplay();
+  }
+
+  // 6. UI Display Handlers
+  if (isSmsAlertActive) {
+    drawSmsAlertUI();
+  } else if (isBannerActive) {
+    drawAutoLockBanner();
+  } else if (isDeviceLocked) {
     if (isPeekClockActive) {
       if (currentMillis - lastDisplayDraw >= 200) {
         lastDisplayDraw = currentMillis;
@@ -1176,7 +1352,7 @@ void loop() {
     }
   }
 
-  // 5. Active & Background Logic Execution
+  // 7. Active & Background Logic Execution
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
@@ -1186,7 +1362,7 @@ void loop() {
         wifi_set_channel(currentChannel);
       }
 
-      if (!isDeviceLocked && !isClockModeActive && (currentMillis - lastDisplayDraw >= 50)) {
+      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 50)) {
         lastDisplayDraw = currentMillis;
         sweepAngle += 0.15;
         if (sweepAngle >= 2 * PI) sweepAngle = 0;
@@ -1202,7 +1378,7 @@ void loop() {
           triggerWifiScan();
         }
 
-        if (!isClockModeActive && (currentMillis - lastDisplayDraw >= 200)) {
+        if (!isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 200)) {
           lastDisplayDraw = currentMillis;
           drawScannerUI();
         }
@@ -1212,7 +1388,7 @@ void loop() {
 
     case MODE_RF_TRIPWIRE: {
       if (WiFi.status() != WL_CONNECTED) {
-        if (!isDeviceLocked && !isClockModeActive && (currentMillis - lastDisplayDraw >= 300)) {
+        if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 300)) {
           lastDisplayDraw = currentMillis;
           display.clearDisplay();
           display.setTextColor(SSD1306_WHITE);
@@ -1252,7 +1428,7 @@ void loop() {
             isCalibrating = false;
           }
 
-          if (!isDeviceLocked && !isClockModeActive) {
+          if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive) {
             display.clearDisplay();
             display.setTextColor(SSD1306_WHITE);
             display.setTextSize(1);
@@ -1286,7 +1462,7 @@ void loop() {
         waveBuffer[waveIndex] = yVal;
         waveIndex = (waveIndex + 1) % WAVE_POINTS;
 
-        if (!isDeviceLocked && !isClockModeActive) {
+        if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive) {
           drawTripwireUI(delta, currentRssi, isMotionActive);
         }
       }
@@ -1320,7 +1496,7 @@ void loop() {
         irrecv.resume();
       }
 
-      if (!isDeviceLocked && !isClockModeActive && (currentMillis - lastDisplayDraw >= 100)) {
+      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 100)) {
         lastDisplayDraw = currentMillis;
         drawDecoderUI();
       }
