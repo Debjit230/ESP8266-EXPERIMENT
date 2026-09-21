@@ -50,12 +50,16 @@ bool autoDimEnabled      = false;
 bool autoLockEnabled     = true;
 uint16_t autoLockSeconds = 60;
 
-// Scheduled SMS / Reminder Storage
+// Scheduled SMS / Birthday Wish Storage
 uint32_t scheduledSmsEpoch = 0;
-char scheduledSmsText[50]  = "";
+char scheduledSmsText[64]  = "";
 bool isSmsAlertActive      = false;
 unsigned long smsAlertStartTime = 0;
-const unsigned long SMS_DISPLAY_DURATION = 15000; // 15 seconds on screen
+const unsigned long SMS_DISPLAY_DURATION = 30000; // 30 seconds celebration duration
+
+// Marquee Text Animation Parameters
+int marqueeScrollX = 128;
+unsigned long lastMarqueeShift = 0;
 
 ESP8266WebServer server(80);
 
@@ -266,8 +270,10 @@ void setEmotion(EmoState newEmo);
 void enterLockScreen();
 void unlockDevice();
 void drawAutoLockBanner();
-void drawSmsAlertUI();
+void drawBirthdayWishUI();
 void checkScheduledSms();
+void drawHappyArchedEye(int x, int y, int w);
+void drawSmallHeart(int x, int y);
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -303,10 +309,10 @@ void loadCredentials() {
     uint32_t b3 = EEPROM.read(EEPROM_SMS_TIME_ADDR + 3);
     scheduledSmsEpoch = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 
-    for (int i = 0; i < 49; i++) {
+    for (int i = 0; i < 63; i++) {
       scheduledSmsText[i] = EEPROM.read(EEPROM_SMS_TEXT_ADDR + i);
     }
-    scheduledSmsText[49] = '\0';
+    scheduledSmsText[63] = '\0';
   } else {
     strncpy(target_ssid, "Airfiber-3rdFloorBachelor", sizeof(target_ssid));
     strncpy(target_password, "Airfiber-3rdfloor", sizeof(target_password));
@@ -355,10 +361,10 @@ void saveScheduledSms(uint32_t epoch, const String& text) {
   EEPROM.write(EEPROM_SMS_TIME_ADDR + 3, epoch & 0xFF);
 
   text.toCharArray(scheduledSmsText, sizeof(scheduledSmsText));
-  for (int i = 0; i < 49; i++) {
+  for (int i = 0; i < 63; i++) {
     EEPROM.write(EEPROM_SMS_TEXT_ADDR + i, i < (int)text.length() ? text[i] : 0);
   }
-  EEPROM.write(EEPROM_SMS_TEXT_ADDR + 49, 0);
+  EEPROM.write(EEPROM_SMS_TEXT_ADDR + 63, 0);
   EEPROM.commit();
 }
 
@@ -490,11 +496,11 @@ void handleRoot() {
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
 
-    // Scheduled SMS / Reminder Section (Default empty input box)
-    html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Schedule SMS Alert</h3>";
-    html += "<label>Message Text (max 48 chars):</label>";
-    html += "<input type='text' name='smstext' maxlength='48' value=''>";
-    html += "<label>Alarm Date & Time:</label>";
+    // Scheduled Birthday Wish Section (Clean empty input)
+    html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Schedule Birthday Wish</h3>";
+    html += "<label>Wish Message (e.g. Happy Birthday Ankita!):</label>";
+    html += "<input type='text' name='smstext' maxlength='60' placeholder='Type your message here...' value=''>";
+    html += "<label>Wish Date & Time:</label>";
     html += "<input type='datetime-local' name='smstime'>";
 
     if (scheduledSmsEpoch > 0) {
@@ -502,7 +508,7 @@ void handleRoot() {
       struct tm* tmInfo = localtime(&t);
       char buf[32];
       snprintf(buf, sizeof(buf), "%02d-%02d-%04d %02d:%02d", tmInfo->tm_mday, tmInfo->tm_mon + 1, tmInfo->tm_year + 1900, tmInfo->tm_hour, tmInfo->tm_min);
-      html += "<p style='font-size:12px;color:#00bcd4;margin:4px 0 12px 0;'>Scheduled: " + String(buf) + "</p>";
+      html += "<p style='font-size:12px;color:#00bcd4;margin:4px 0 12px 0;'>Active Scheduled: " + String(buf) + "</p>";
     }
 
     html += "<input type='submit' value='Save & Reboot'></form></body></html>";
@@ -535,7 +541,7 @@ void handleConfigSave() {
   }
 
   // Parse HTML datetime-local: "YYYY-MM-DDTHH:MM"
-  if (reqSmsTime.length() >= 16) {
+  if (reqSmsTime.length() >= 16 && reqSmsText.length() > 0) {
     struct tm targetTm;
     memset(&targetTm, 0, sizeof(struct tm));
     targetTm.tm_year = reqSmsTime.substring(0, 4).toInt() - 1900;
@@ -560,7 +566,7 @@ void handleConfigSave() {
     html += "<h2>Settings Saved!</h2><p>Brightness: " + String(newBright) + "</p>";
     html += "<p>Auto-Lock: " + String(reqAutoLock ? "ON (" + String(newLockSec) + "s)" : "OFF") + "</p>";
     if (scheduledSmsEpoch > 0) {
-      html += "<p>SMS Scheduled: " + String(scheduledSmsText) + "</p>";
+      html += "<p>Wish Scheduled: " + String(scheduledSmsText) + "</p>";
     }
     html += "<p>Rebooting...</p></body></html>";
     server.send(200, "text/html", html);
@@ -700,13 +706,13 @@ void drawDeskBuddyEye(int x, int y, int w, int h, int pupilShiftX, int pupilShif
   display.fillRoundRect(pupilCenterX - (pupilW / 2), pupilCenterY - (pupilH / 2), pupilW, pupilH, 3, SSD1306_BLACK);
 }
 
-// Draw happy curved arched eye (Desk-Buddy inverted crescent)
+// Draw happy curved arched eye (Desk-Buddy inverted crescent)[cite: 6]
 void drawHappyArchedEye(int x, int y, int w) {
   display.fillRoundRect(x, y, w, 18, 9, SSD1306_WHITE);
   display.fillRoundRect(x, y + 6, w, 18, 9, SSD1306_BLACK);
 }
 
-// Draw small heart icon between eyes
+// Draw small heart icon between eyes[cite: 6]
 void drawSmallHeart(int x, int y) {
   display.fillCircle(x - 2, y, 2, SSD1306_WHITE);
   display.fillCircle(x + 2, y, 2, SSD1306_WHITE);
@@ -727,35 +733,55 @@ void drawAutoLockBanner() {
   display.display();
 }
 
-// On-screen SMS / Reminder Display (Footer text removed)
-void drawSmsAlertUI() {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 60, 6, SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+// Smooth scrolling right-to-left birthday wish with alternating loving heart eyes
+void drawBirthdayWishUI() {
+  unsigned long now = millis();
+  unsigned long elapsed = now - smsAlertStartTime;
 
-  display.setCursor(16, 10);
-  display.print("*** SMS ALERT ***");
-  display.drawLine(6, 22, 121, 22, SSD1306_WHITE);
+  // Cycle: Scroll text for 4.5s, then show loving heart face for 2.0s
+  unsigned long cycleTime = elapsed % 6500;
 
-  display.setCursor(10, 32);
-  display.print(scheduledSmsText);
-  display.display();
+  if (cycleTime > 4500) {
+    // Show Loving Heart Face in the celebration loop[cite: 6]
+    display.clearDisplay();
+    drawHappyArchedEye(24, 21, 30);
+    drawHappyArchedEye(74, 21, 30);
+    drawSmallHeart(64, 19);
+    display.display();
+  } else {
+    // Smooth Marquee scroll right-to-left
+    if (now - lastMarqueeShift >= 30) {
+      lastMarqueeShift = now;
+      marqueeScrollX -= 3;
+      int textPixelWidth = strlen(scheduledSmsText) * 12;
+      if (marqueeScrollX < -textPixelWidth) {
+        marqueeScrollX = SCREEN_WIDTH;
+      }
+    }
+
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(marqueeScrollX, 24);
+    display.print(scheduledSmsText);
+    display.display();
+  }
 }
 
-// Periodic check against real NTP time for scheduled SMS trigger
+// Periodic check against real NTP time for scheduled wish trigger
 void checkScheduledSms() {
   if (scheduledSmsEpoch == 0 || isSmsAlertActive) return;
 
   time_t now = time(nullptr);
   if (now < 100000) return;
 
+  // Trigger when current time enters the target minute
   if ((uint32_t)now >= scheduledSmsEpoch && (uint32_t)now < scheduledSmsEpoch + 120) {
     isSmsAlertActive = true;
     smsAlertStartTime = millis();
+    marqueeScrollX = SCREEN_WIDTH;
     triggerLedAlert();
-    setEmotion(EMO_LOVE);
-    clearScheduledSms();
+    clearScheduledSms(); // Consume scheduled wish
   }
 }
 
@@ -1186,10 +1212,10 @@ void loop() {
     shutoffLeds();
   }
 
-  // 2. Periodic NTP check for scheduled message alert
+  // 2. Periodic NTP check for scheduled birthday wish trigger
   checkScheduledSms();
 
-  // 3. Auto-expire SMS pop-up after 15 seconds
+  // 3. Auto-expire Birthday Wish marquee after 30 seconds
   if (isSmsAlertActive && (currentMillis - smsAlertStartTime >= SMS_DISPLAY_DURATION)) {
     isSmsAlertActive = false;
     display.clearDisplay();
@@ -1209,12 +1235,14 @@ void loop() {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!holdThresholdMet) {
+        // Holding for 700ms on the lock screen triggers the Loving Eye expression[cite: 6]
         if (isDeviceLocked && heldTime >= 700) {
           holdThresholdMet = true;
           clickCount = 0;
           isPeekClockActive = false;
           setEmotion(EMO_LOVE);
         }
+        // Holding for 2000ms in active sensor modes opens AP Config Portal
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
@@ -1236,7 +1264,7 @@ void loop() {
         clickCount++;
         lastClickTime = currentMillis;
 
-        // Dismiss active SMS alert immediately on click
+        // Dismiss active birthday wish immediately on manual button press
         if (isSmsAlertActive) {
           isSmsAlertActive = false;
           clickCount = 0;
@@ -1321,7 +1349,7 @@ void loop() {
 
   // 6. UI Display Handlers
   if (isSmsAlertActive) {
-    drawSmsAlertUI();
+    drawBirthdayWishUI();
   } else if (isBannerActive) {
     drawAutoLockBanner();
   } else if (isDeviceLocked) {
