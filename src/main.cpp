@@ -45,8 +45,8 @@ char target_ssid[33]     = "";
 char target_password[65] = "";
 uint8_t userBrightness   = 255;
 bool autoDimEnabled      = false;
-bool autoLockEnabled     = true;   // Auto-lock toggle
-uint16_t autoLockSeconds = 60;     // Configurable lock timeout (seconds)
+bool autoLockEnabled     = true;
+uint16_t autoLockSeconds = 60;
 
 ESP8266WebServer server(80);
 
@@ -56,7 +56,7 @@ const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
 // Timers & Lock Settings
-const unsigned long CLOCK_TIMEOUT_MS = 20000; // 20 sec -> Clock screensaver
+const unsigned long CLOCK_TIMEOUT_MS = 20000;
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
@@ -74,19 +74,19 @@ void setOledBrightness(uint8_t contrast) {
 // Global Non-Blocking Alert LED Controller
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
-const unsigned long LED_ALERT_DURATION = 120; // 120ms flash duration
+const unsigned long LED_ALERT_DURATION = 120;
 
 void triggerLedAlert() {
   alertLedActive = true;
   alertLedStart = millis();
 
   digitalWrite(EXTERNAL_LED, HIGH);
-  digitalWrite(BOARD_LED, LOW); // Active-LOW: LOW is ON
+  digitalWrite(BOARD_LED, LOW);
 }
 
 void shutoffLeds() {
   digitalWrite(EXTERNAL_LED, LOW);
-  digitalWrite(BOARD_LED, HIGH); // Active-LOW: HIGH is OFF
+  digitalWrite(BOARD_LED, HIGH);
 }
 
 // Emotion Engine Definitions
@@ -96,7 +96,7 @@ enum EmoState {
   EMO_SHOCKED,
   EMO_WINK,
   EMO_SLEEP,
-  EMO_GOOD_MORNING,
+  EMO_HAPPY,
   EMO_DIZZY
 };
 
@@ -231,7 +231,7 @@ int clickCount = 0;
 unsigned long lastClickTime = 0;
 const unsigned long DOUBLE_CLICK_GAP = 350;
 
-// Advanced EMO Eye Coordinates with LERP Motion Smoothing
+// Desk-Buddy Eye Coordinates & LERP Smoothing
 float currentEyeX = 0.0;
 float currentEyeY = 0.0;
 float targetEyeX  = 0.0;
@@ -398,25 +398,21 @@ void handleRoot() {
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
 
-    // Manual Brightness Slider
     html += "<div class='slider-container'>";
     html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
     html += "</div>";
 
-    // Auto-Dim Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
     html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
     html += "</div>";
 
-    // Auto-Lock Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autolock' name='autolock' value='1'" + String(autoLockEnabled ? " checked" : "") + ">";
     html += "<label for='autolock' style='font-size:13px;cursor:pointer;color:#eee;'>Enable Auto-Lock (EMO Face)</label>";
     html += "</div>";
 
-    // Auto-Lock Seconds Slider
     html += "<div class='slider-container'>";
     html += "<label>Lock Timeout (sec): <span id='lVal' class='val-badge'>" + String(autoLockSeconds) + "s</span></label>";
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
@@ -551,7 +547,7 @@ void enterLockScreen() {
   if (isNightWindow()) {
     currentEmotion = EMO_SLEEP;
   } else if (isMorningWindow()) {
-    setEmotion(EMO_GOOD_MORNING);
+    setEmotion(EMO_HAPPY);
   } else {
     currentEmotion = EMO_NORMAL;
   }
@@ -571,7 +567,44 @@ void unlockDevice() {
   configureMode(resumeMode);
 }
 
-// Advanced Smooth EMO Renderer with LERP Interpolation
+// Draw a smooth Desk-Buddy style eye with rounded square outline and inner pupil
+void drawDeskBuddyEye(int x, int y, int w, int h, int pupilShiftX, int pupilShiftY) {
+  if (h <= 4) {
+    display.fillRoundRect(x, y + 13, w, 4, 2, SSD1306_WHITE);
+    return;
+  }
+
+  int cornerRadius = 9;
+  if (h < 18) cornerRadius = h / 2;
+
+  // Outer rounded square body
+  display.fillRoundRect(x, y, w, h, cornerRadius, SSD1306_WHITE);
+
+  // Inner cutout pupil (creates the stylized hollow eye look)
+  int pupilW = 10;
+  int pupilH = (h > 16) ? 10 : (h - 6);
+  if (pupilH < 3) pupilH = 3;
+
+  int pupilCenterX = x + (w / 2) + pupilShiftX;
+  int pupilCenterY = y + (h / 2) + pupilShiftY;
+
+  display.fillRoundRect(pupilCenterX - (pupilW / 2), pupilCenterY - (pupilH / 2), pupilW, pupilH, 3, SSD1306_BLACK);
+}
+
+// Draw happy curved arched eye (inverted crescent)
+void drawHappyArchedEye(int x, int y, int w) {
+  display.fillRoundRect(x, y, w, 18, 9, SSD1306_WHITE);
+  display.fillRoundRect(x, y + 6, w, 18, 9, SSD1306_BLACK);
+}
+
+// Draw small heart icon between eyes
+void drawSmallHeart(int x, int y) {
+  display.fillCircle(x - 2, y, 2, SSD1306_WHITE);
+  display.fillCircle(x + 2, y, 2, SSD1306_WHITE);
+  display.fillTriangle(x - 4, y, x + 4, y, x, y + 5, SSD1306_WHITE);
+}
+
+// Desk-Buddy Emotional Engine Renderer
 void drawEmoFace() {
   unsigned long now = millis();
 
@@ -591,16 +624,47 @@ void drawEmoFace() {
 
   display.clearDisplay();
 
-  const int eyeW = 28;
-  const int leftEyeBaseX = 26;
+  const int eyeW = 30;
+  const int leftEyeBaseX = 24;
   const int rightEyeBaseX = 74;
   const int eyeBaseY = 17;
 
-  // 1. DIZZY STATE (Smooth rotating spirals)
+  // 1. HAPPY / GOOD MORNING STATE (Arched eyes with heart)
+  if (currentEmotion == EMO_HAPPY) {
+    drawHappyArchedEye(leftEyeBaseX, eyeBaseY + 4, eyeW);
+    drawHappyArchedEye(rightEyeBaseX, eyeBaseY + 4, eyeW);
+    drawSmallHeart(64, eyeBaseY + 2);
+    display.display();
+    return;
+  }
+
+  // 2. SLEEPING STATE (Bottom-curved sleepy half circles with floating Zzz)
+  if (currentEmotion == EMO_SLEEP) {
+    display.fillRoundRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 14, 7, SSD1306_WHITE);
+    display.fillRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 7, SSD1306_BLACK);
+
+    display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 14, 7, SSD1306_WHITE);
+    display.fillRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 7, SSD1306_BLACK);
+
+    if (now - lastZzzAnim > 350) {
+      lastZzzAnim = now;
+      zzzStep = (zzzStep + 1) % 4;
+    }
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    if (zzzStep >= 1) { display.setCursor(98, 22); display.print("z"); }
+    if (zzzStep >= 2) { display.setCursor(106, 14); display.print("Z"); }
+    if (zzzStep >= 3) { display.setCursor(114, 6);  display.print("Z"); }
+
+    display.display();
+    return;
+  }
+
+  // 3. DIZZY STATE (Concentric spinning spirals)
   if (currentEmotion == EMO_DIZZY) {
     dizzyAngle += 0.35;
-    int lx = leftEyeBaseX + 14;
-    int rx = rightEyeBaseX + 14;
+    int lx = leftEyeBaseX + 15;
+    int rx = rightEyeBaseX + 15;
     int cy = eyeBaseY + 15;
 
     for (int r = 4; r <= 16; r += 4) {
@@ -614,47 +678,16 @@ void drawEmoFace() {
     return;
   }
 
-  // 2. GOOD MORNING STATE
-  if (currentEmotion == EMO_GOOD_MORNING) {
-    display.fillRoundRect(leftEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
-    display.fillRoundRect(rightEyeBaseX, eyeBaseY + 2, eyeW, 26, 8, SSD1306_WHITE);
-    display.fillRect(leftEyeBaseX, eyeBaseY + 16, eyeW, 14, SSD1306_BLACK);
-    display.fillRect(rightEyeBaseX, eyeBaseY + 16, eyeW, 14, SSD1306_BLACK);
-
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(22, 50);
-    display.print("GOOD MORNING!");
-
-    display.display();
-    return;
-  }
-
-  // 3. SLEEPING STATE
-  if (currentEmotion == EMO_SLEEP) {
-    display.fillRect(leftEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
-    display.fillRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 3, SSD1306_WHITE);
-
-    if (now - lastZzzAnim > 350) {
-      lastZzzAnim = now;
-      zzzStep = (zzzStep + 1) % 4;
-    }
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    if (zzzStep >= 1) { display.setCursor(98, 24); display.print("z"); }
-    if (zzzStep >= 2) { display.setCursor(106, 15); display.print("Z"); }
-    if (zzzStep >= 3) { display.setCursor(114, 6);  display.print("Z"); }
-
-    display.display();
-    return;
-  }
-
-  // 4. SHOCKED STATE
+  // 4. SHOCKED STATE (Expanded wide circles with small center pupils)
   if (currentEmotion == EMO_SHOCKED) {
-    display.fillCircle(leftEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
-    display.fillCircle(rightEyeBaseX + 14, eyeBaseY + 15, 17, SSD1306_WHITE);
-    display.fillCircle(leftEyeBaseX + 14, eyeBaseY + 15, 5, SSD1306_BLACK);
-    display.fillCircle(rightEyeBaseX + 14, eyeBaseY + 15, 5, SSD1306_BLACK);
+    int lx = leftEyeBaseX + 15;
+    int rx = rightEyeBaseX + 15;
+    int cy = eyeBaseY + 15;
+
+    display.fillCircle(lx, cy, 18, SSD1306_WHITE);
+    display.fillCircle(rx, cy, 18, SSD1306_WHITE);
+    display.fillCircle(lx, cy, 6, SSD1306_BLACK);
+    display.fillCircle(rx, cy, 6, SSD1306_BLACK);
 
     display.display();
     return;
@@ -665,8 +698,11 @@ void drawEmoFace() {
     display.fillRoundRect(leftEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 8, eyeW, 16, 4, SSD1306_WHITE);
 
-    display.fillTriangle(leftEyeBaseX, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 15, SSD1306_BLACK);
-    display.fillTriangle(rightEyeBaseX, eyeBaseY + 8, rightEyeBaseX + eyeW, eyeBaseY + 8, rightEyeBaseX, eyeBaseY + 15, SSD1306_BLACK);
+    display.fillTriangle(leftEyeBaseX, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 8, leftEyeBaseX + eyeW, eyeBaseY + 14, SSD1306_BLACK);
+    display.fillTriangle(rightEyeBaseX, eyeBaseY + 8, rightEyeBaseX + eyeW, eyeBaseY + 8, rightEyeBaseX, eyeBaseY + 14, SSD1306_BLACK);
+
+    display.fillRect(leftEyeBaseX + 10, eyeBaseY + 12, 10, 8, SSD1306_BLACK);
+    display.fillRect(rightEyeBaseX + 10, eyeBaseY + 12, 10, 8, SSD1306_BLACK);
 
     display.display();
     return;
@@ -674,28 +710,27 @@ void drawEmoFace() {
 
   // 6. WINK STATE
   if (currentEmotion == EMO_WINK) {
-    display.fillRoundRect(leftEyeBaseX, eyeBaseY, eyeW, 30, 7, SSD1306_WHITE);
+    drawDeskBuddyEye(leftEyeBaseX, eyeBaseY, eyeW, 30, 0, 0);
     display.fillRoundRect(rightEyeBaseX, eyeBaseY + 14, eyeW, 4, 2, SSD1306_WHITE);
-
     display.display();
     return;
   }
 
-  // 7. NORMAL IDLE STATE WITH LERP GLIDE & BLINKING
+  // 7. NORMAL IDLE STATE WITH LERP GLIDE & DYNAMIC PUPILS
   if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2400, 4500))) {
     lastEyeTargetShift = now;
 
     if (random(0, 100) < 35) {
       isBlinking = true;
       blinkStartTime = now;
-      targetEyeH = 3.0;
+      targetEyeH = 4.0;
     } else {
-      targetEyeX = random(-8, 9);
+      targetEyeX = random(-7, 8);
       targetEyeY = random(-4, 5);
     }
   }
 
-  if (isBlinking && (now - blinkStartTime > 140)) {
+  if (isBlinking && (now - blinkStartTime > 130)) {
     isBlinking = false;
     targetEyeH = 30.0;
   }
@@ -704,13 +739,17 @@ void drawEmoFace() {
   currentEyeY += (targetEyeY - currentEyeY) * 0.25;
   currentEyeH += (targetEyeH - currentEyeH) * 0.35;
 
-  int renderH = constrain((int)currentEyeH, 3, 30);
+  int renderH = constrain((int)currentEyeH, 4, 30);
   int lx = constrain(leftEyeBaseX + (int)currentEyeX, 4, 46);
   int rx = constrain(rightEyeBaseX + (int)currentEyeX, 54, 96);
   int y  = constrain(eyeBaseY + (int)currentEyeY + (30 - renderH) / 2, 6, 32);
 
-  display.fillRoundRect(lx, y, eyeW, renderH, 7, SSD1306_WHITE);
-  display.fillRoundRect(rx, y, eyeW, renderH, 7, SSD1306_WHITE);
+  // Pupil moves proportionally to the glance direction
+  int pupilOffsetX = constrain((int)(currentEyeX * 0.5), -4, 4);
+  int pupilOffsetY = constrain((int)(currentEyeY * 0.5), -3, 3);
+
+  drawDeskBuddyEye(lx, y, eyeW, renderH, pupilOffsetX, pupilOffsetY);
+  drawDeskBuddyEye(rx, y, eyeW, renderH, pupilOffsetX, pupilOffsetY);
 
   display.display();
 }
@@ -1000,7 +1039,7 @@ void setup() {
 
   if (isMorningWindow()) {
     enterLockScreen();
-    setEmotion(EMO_GOOD_MORNING);
+    setEmotion(EMO_HAPPY);
   } else if (currentMode != MODE_AP_CONFIG) {
     configureMode(MODE_RADAR);
   }
@@ -1029,14 +1068,12 @@ void loop() {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
       if (!holdThresholdMet) {
-        // Condition A: If on the EMO face, holding for 700ms triggers DIZZY!
         if (isDeviceLocked && heldTime >= 700) {
           holdThresholdMet = true;
           clickCount = 0;
           isPeekClockActive = false;
           setEmotion(EMO_DIZZY);
         }
-        // Condition B: If in active sensor modes, holding for 2000ms triggers AP CONFIG
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
@@ -1069,12 +1106,10 @@ void loop() {
       }
     }
 
-    // Single click resolution
     if (clickCount == 1 && (currentMillis - lastClickTime > DOUBLE_CLICK_GAP)) {
       clickCount = 0;
 
       if (isDeviceLocked) {
-        // Peek Clock: Show time for 3 seconds while remaining in locked state
         isPeekClockActive = true;
         peekClockStartTime = currentMillis;
         display.clearDisplay();
@@ -1100,11 +1135,9 @@ void loop() {
 
   // 3. Automated Locks and Screen Savers
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
-    // Configurable Auto-Lock Check (if enabled)
     if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
     } 
-    // Otherwise check for 20-second inactivity clock screensaver
     else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
       if (autoDimEnabled) {
