@@ -148,6 +148,7 @@ void setEmotion(EmoState newEmo) {
 
 bool isMorningWindow() {
   time_t tNow = time(nullptr);
+  if (tNow < 100000) return false;
   struct tm* timeinfo = localtime(&tNow);
   if (timeinfo->tm_hour == 6) return true;
   if (timeinfo->tm_hour == 7 && timeinfo->tm_min <= 30) return true;
@@ -156,6 +157,7 @@ bool isMorningWindow() {
 
 bool isNightWindow() {
   time_t tNow = time(nullptr);
+  if (tNow < 100000) return false;
   struct tm* timeinfo = localtime(&tNow);
   if (timeinfo->tm_hour >= 23 || timeinfo->tm_hour < 6) return true;
   return false;
@@ -663,8 +665,6 @@ void enterLockScreen() {
 
   if (isNightWindow()) {
     currentEmotion = EMO_SLEEP;
-  } else if (isMorningWindow()) {
-    setEmotion(EMO_LOVE);
   } else {
     currentEmotion = EMO_NORMAL;
   }
@@ -853,13 +853,9 @@ void checkScheduledSms() {
 void drawEmoFace() {
   unsigned long now = millis();
 
-  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP) {
+  if (currentEmotion != EMO_NORMAL && currentEmotion != EMO_SLEEP && currentEmotion != EMO_LOVE) {
     if (now - emotionHoldStartTime > EMOTION_HOLD_MS) {
       currentEmotion = isNightWindow() ? EMO_SLEEP : EMO_NORMAL;
-    }
-  } else {
-    if (isNightWindow()) {
-      currentEmotion = EMO_SLEEP;
     }
   }
 
@@ -871,10 +867,12 @@ void drawEmoFace() {
   const int eyeBaseY = 17;
 
   if (currentEmotion == EMO_LOVE) {
-    int heartY = 19 + (int)(sin(now * 0.01) * 2.0);
+    int heartY = 19 + (int)(sin(now * 0.012) * 3.0);
+    int heartScale = ((now / 200) % 2 == 0) ? 3 : 2;
+
     drawHappyArchedEye(leftEyeBaseX, eyeBaseY + 4, eyeW);
     drawHappyArchedEye(rightEyeBaseX, eyeBaseY + 4, eyeW);
-    drawSmallHeart(64, heartY, 2);
+    drawSmallHeart(64, heartY, heartScale);
     display.display();
     return;
   }
@@ -929,7 +927,6 @@ void drawEmoFace() {
     return;
   }
 
-  // Active Natural Blink & Look Dynamics
   if (!isBlinking && (now - lastEyeTargetShift > (unsigned long)random(2200, 4200))) {
     lastEyeTargetShift = now;
     if (random(0, 100) < 35) {
@@ -1175,72 +1172,101 @@ void drawDecoderUI() {
   display.display();
 }
 
-// Boot Sequence: "Hi! I am COCO" with Synchronized Strobe, followed by an Animated EMO Face during background Wi-Fi & NTP sync
+// Startup connection routine: Clean display showing COCO, SSID, and Time Sync
 void syncTimeAtStartup() {
-  const char* introMsg = "Hi! I am COCO";
-  int introPixelWidth = strlen(introMsg) * 12;
-  int scrollPos = SCREEN_WIDTH;
-
-  // 1. Scrolling Marquee Intro with LED Blinking
-  while (scrollPos > -introPixelWidth) {
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextWrap(false);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(scrollPos, 24);
-    display.print(introMsg);
-    display.display();
-
-    bool ledState = ((scrollPos / 12) % 2 == 0);
-    digitalWrite(EXTERNAL_LED, ledState ? HIGH : LOW);
-    digitalWrite(BOARD_LED, ledState ? LOW : HIGH);
-
-    scrollPos -= 4;
-    delay(25);
-  }
-
   shutoffLeds();
 
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(40, 2);
+  display.print("COCO");
+  display.drawFastHLine(14, 20, 100, SSD1306_WHITE);
+
+  display.setTextSize(1);
+  display.setCursor(0, 26);
+  display.print("Connecting to AP:");
+  display.setCursor(0, 38);
+  display.print(target_ssid[0] ? target_ssid : "[NO SSID SET]");
+  display.display();
+
   if (!target_ssid[0]) {
-    drawEmoFace();
+    delay(1500);
     return;
   }
 
-  // 2. Start Wi-Fi connection in the background
   WiFi.mode(WIFI_STA);
   WiFi.begin(target_ssid, target_password);
 
   unsigned long start = millis();
-  unsigned long lastAnimUpdate = 0;
-
-  // Run dynamic animated EMO eyes while waiting for connection
+  int dotCount = 0;
   while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
-    if (millis() - lastAnimUpdate >= 30) {
-      lastAnimUpdate = millis();
-      drawEmoFace();
-    }
-
     if (digitalRead(BUTTON_PIN) == LOW) {
       configureMode(MODE_AP_CONFIG);
       return;
     }
-    delay(10);
+
+    display.fillRect(0, 50, 128, 12, SSD1306_BLACK);
+    display.setCursor(0, 50);
+    display.print("Connecting");
+    for (int i = 0; i < dotCount; i++) display.print(".");
+    display.display();
+
+    dotCount = (dotCount + 1) % 4;
+    delay(250);
   }
 
-  // 3. NTP sync while keeping eyes alive on screen
   if (WiFi.status() == WL_CONNECTED) {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(40, 2);
+    display.print("COCO");
+    display.drawFastHLine(14, 20, 100, SSD1306_WHITE);
+
+    display.setTextSize(1);
+    display.setCursor(0, 26);
+    display.print("Wi-Fi Connected!");
+    display.setCursor(0, 38);
+    display.print("Setting Date & Time...");
+    display.display();
+
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
     time_t now = time(nullptr);
     start = millis();
     while (now < 100000 && millis() - start < 4000) {
-      if (millis() - lastAnimUpdate >= 30) {
-        lastAnimUpdate = millis();
-        drawEmoFace();
-      }
-      delay(10);
+      delay(150);
       now = time(nullptr);
     }
+
+    if (now >= 100000) {
+      struct tm* t = localtime(&now);
+      display.clearDisplay();
+      display.setTextSize(2);
+      display.setCursor(40, 2);
+      display.print("COCO");
+      display.drawFastHLine(14, 20, 100, SSD1306_WHITE);
+
+      display.setTextSize(1);
+      display.setCursor(0, 28);
+      display.printf("Time: %02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+      display.setCursor(0, 42);
+      display.printf("Date: %02d-%02d-%04d", t->tm_mday, t->tm_mon + 1, t->tm_year + 1900);
+      display.display();
+      delay(1200);
+    }
+  } else {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(40, 2);
+    display.print("COCO");
+    display.drawFastHLine(14, 20, 100, SSD1306_WHITE);
+
+    display.setTextSize(1);
+    display.setCursor(0, 30);
+    display.print("Wi-Fi Timeout!");
+    display.display();
+    delay(1000);
   }
 }
 
@@ -1272,10 +1298,8 @@ void setup() {
 
   lastUserActivity = millis();
 
-  if (isMorningWindow()) {
-    enterLockScreen();
-    setEmotion(EMO_LOVE);
-  } else if (currentMode != MODE_AP_CONFIG) {
+  // Directly enter active radar working mode
+  if (currentMode != MODE_AP_CONFIG) {
     configureMode(MODE_RADAR);
   }
 }
