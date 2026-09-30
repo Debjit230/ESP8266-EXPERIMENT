@@ -44,6 +44,10 @@ uint8_t nrfValues[NRF_NUM_CHANNELS];
 uint8_t nrfStreak[NRF_NUM_CHANNELS];   // consecutive activity hits per channel
 uint8_t nrfHold[NRF_NUM_CHANNELS];     // freezes a bar briefly after a hit
 uint8_t nrfRxScratch[32];
+
+// Scrolling spectrum history (right-to-left)
+#define GRAPH_WIDTH 112
+uint8_t nrfScrollBuf[GRAPH_WIDTH];   // one summary column per sweep, 0..63
 uint32_t totalNrfHits = 0;
 uint8_t peakChannel = 0;
 uint8_t peakValue = 0;
@@ -616,6 +620,7 @@ void initNrfScanner() {
     memset(nrfValues, 0, sizeof(nrfValues));
     memset(nrfStreak, 0, sizeof(nrfStreak));
     memset(nrfHold, 0, sizeof(nrfHold));
+  memset(nrfScrollBuf, 0, sizeof(nrfScrollBuf));
     totalNrfHits = 0;
     nrfDeviceFound = false;
     return;
@@ -632,6 +637,7 @@ void initNrfScanner() {
   memset(nrfValues, 0, sizeof(nrfValues));
   memset(nrfStreak, 0, sizeof(nrfStreak));
   memset(nrfHold, 0, sizeof(nrfHold));
+  memset(nrfScrollBuf, 0, sizeof(nrfScrollBuf));
   totalNrfHits = 0;
   nrfDeviceFound = false;
 }
@@ -1252,68 +1258,57 @@ void drawNrfScannerUI() {
     return;
   }
 
+  // ---------- Header ----------
   if (nrfDeviceFound) {
     bool blinkPhase = ((millis() / 140) % 2 == 0);
     display.fillRect(0, 0, 128, 12, blinkPhase ? SSD1306_WHITE : SSD1306_BLACK);
     display.setTextColor(blinkPhase ? SSD1306_BLACK : SSD1306_WHITE);
     display.setCursor(4, 2);
-    display.print("SIGNAL FOUND");
-    display.setCursor(90, 2);
-    display.printf("%d", nrfFoundChannel);
+    display.print("SIGNAL FOUND CH:");
+    display.print(nrfFoundChannel);
     display.setTextColor(SSD1306_WHITE);
   } else {
     display.setCursor(0, 0);
     display.printf("PKTS:%u", (unsigned int)totalNrfHits);
-    display.setCursor(54, 0);
-    display.printf("PEAK:%d", peakChannel);
-    display.setCursor(103, 0);
-    display.printf("%dM", 2400 + peakChannel);
+    display.setCursor(70, 0);
+    display.printf("PEAK:%dM", 2400 + peakChannel);
+    display.setCursor(0, 10);
+    display.print("2.4GHz SPECTRUM HISTORY");
   }
 
-  const int graphLeft = 8;
-  const int graphTop = 20;
-  const int graphRight = 120;
-  const int graphBottom = 58;
-  const int graphWidth = graphRight - graphLeft + 1;
-  const int graphHeight = graphBottom - graphTop + 1;
+  // ---------- Compact scrolling graph (NOT fullscreen) ----------
+  const int gL = 8;     // left
+  const int gT = 22;    // top
+  const int gR = 120;   // right
+  const int gB = 46;    // bottom
+  const int gW = gR - gL + 1;
+  const int gH = gB - gT + 1;
 
-  display.drawRect(graphLeft, graphTop, graphWidth, graphHeight, SSD1306_WHITE);
-  for (int y = graphTop + 8; y < graphBottom; y += 8) {
-    display.drawFastHLine(graphLeft, y, graphWidth, SSD1306_INVERSE);
-  }
+  display.drawRect(gL, gT, gW, gH, SSD1306_WHITE);
 
-  int prevY = graphBottom;
-  for (int x = 0; x < graphWidth; x++) {
-    int src = map(x, 0, graphWidth - 1, 0, NRF_NUM_CHANNELS - 1);
-    int value = nrfValues[src];
-    int barHeight = map(value, 0, 64, 0, graphHeight - 2);
-    barHeight = constrain(barHeight, 0, graphHeight - 2);
+  int prevY = gB;
+  for (int x = 0; x < gW; x++) {
+    uint8_t v = nrfScrollBuf[x];
+    int bar = map(v, 0, 64, 0, gH - 3);
+    bar = constrain(bar, 0, gH - 3);
+    int y = gB - bar;
+    int sx = gL + x;
 
-    int screenX = graphRight - x;
-    int y = graphBottom - barHeight;
-
-    if (x > 0) {
-      display.drawLine(screenX + 1, prevY, screenX, y, SSD1306_WHITE);
-    }
+    display.drawLine(sx, prevY, sx, y, SSD1306_WHITE); // smooth top line
+    if (bar > 0) display.fillRect(sx, y, 1, bar, SSD1306_WHITE);
     prevY = y;
-
-    if (barHeight > 0) {
-      display.fillRect(screenX, y, 1, barHeight, SSD1306_WHITE);
-    }
   }
 
-  display.setCursor(0, 19);
-  display.print("1");
-  display.setCursor(34, 19);
-  display.print("6");
-  display.setCursor(60, 19);
-  display.print("11");
+  // Live marker on the newest (right) column
+  display.fillTriangle(gR - 1, gB + 2, gR + 4, gB + 2, gR + 1, gB + 7, SSD1306_WHITE);
 
-  if (peakValue > 4) {
-    int px = constrain((int)peakChannel, 0, 127);
-    int peakX = map(px, 0, NRF_NUM_CHANNELS - 1, graphLeft, graphRight);
-    display.fillTriangle(peakX - 2, graphTop - 1, peakX + 2, graphTop - 1, peakX, graphTop + 4, SSD1306_WHITE);
-  }
+  // ---------- Bottom labels ----------
+  display.setCursor(0, 52);
+  display.print("<- OLD");
+  display.setCursor(48, 52);
+  display.print("SCROLLING");
+  display.setCursor(102, 52);
+  display.print("NEW");
 
   display.display();
 }
@@ -1371,6 +1366,18 @@ void scanNrfChannels() {
       peakValue = nrfValues[i];
       peakChannel = i;
     }
+  }
+
+  // --- Push sweep summary into scrolling history (right-to-left) ---
+  uint8_t sweepMax = 0;
+  for (uint8_t i = 0; i < NRF_NUM_CHANNELS; i++) {
+    if (nrfValues[i] > sweepMax) sweepMax = nrfValues[i];
+  }
+  for (uint8_t s = 0; s < 2; s++) {              // scroll speed: columns per sweep
+    for (uint8_t i = 0; i < GRAPH_WIDTH - 1; i++) {
+      nrfScrollBuf[i] = nrfScrollBuf[i + 1];     // shift left
+    }
+    nrfScrollBuf[GRAPH_WIDTH - 1] = sweepMax;    // newest at right edge
   }
 
   if (nrfDeviceFound && (now - nrfFoundAt > NRF_FOUND_BANNER_MS)) {
