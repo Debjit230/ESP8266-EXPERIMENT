@@ -3,6 +3,8 @@
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include <Wire.h>
+#include <SPI.h>
+#include <RF24.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <IRremoteESP8266.h>
@@ -23,11 +25,25 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define OLED_SDA      D3
 #define OLED_SCL      D4
 #define IR_RECV_PIN   D2
-#define BUTTON_PIN    D5
+#define BUTTON_PIN    D1    // GPIO5: Clean reliable pullup, no serial conflict
+#define EXTERNAL_LED  D0    // GPIO16: Clean output
 
-// Indicator LEDs Configuration
-#define EXTERNAL_LED  D1
-#define BOARD_LED     D0
+// nRF24L01 Pin Definitions (Hardware HSPI: SCK=D5, MISO=D6, MOSI=D7)
+#define NRF_CE_PIN    3     // GPIO3 (RX pin used strictly as digital output for CE)
+#define NRF_CSN_PIN   D8    // GPIO15 (CSN)
+RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
+
+// LED Timer State Variables
+bool alertLedActive = false;
+unsigned long alertLedStart = 0;
+const unsigned long LED_ALERT_DURATION = 120;
+
+// nRF24 Spectrum Scanner Channels
+#define NRF_NUM_CHANNELS 128
+uint8_t nrfValues[NRF_NUM_CHANNELS];
+uint32_t totalNrfHits = 0;
+uint8_t peakChannel = 0;
+uint8_t peakValue = 0;
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "COCO-Desk-Buddy";
@@ -59,7 +75,7 @@ bool goodNightEnabled    = true;
 int lastMorningTriggerDay = -1;
 int lastNightTriggerDay   = -1;
 
-// Scheduled Wish Calendar Storage (Matches OLED screen clock)
+// Scheduled Wish Calendar Storage
 struct WishTimeSchedule {
   uint16_t year;
   uint8_t  month;
@@ -73,34 +89,29 @@ WishTimeSchedule wishTarget = {0, 0, 0, 0, 0, false};
 char scheduledSmsText[64]   = "Happy Birthday!";
 bool isSmsAlertActive       = false;
 unsigned long smsAlertStartTime = 0;
-const unsigned long SMS_DISPLAY_DURATION = 30000; // 30 seconds
+const unsigned long SMS_DISPLAY_DURATION = 30000;
 
-// Type of active alert: 0 = Birthday/Custom, 1 = Good Morning, 2 = Good Night
 uint8_t activeAlertType = 0;
-
-// Marquee Text State
 int marqueeScrollX = 128;
 unsigned long lastMarqueeShift = 0;
 
 ESP8266WebServer server(80);
 
-// NTP Time Configuration (IST: UTC +5:30 = 19800 seconds)
-const long  gmtOffset_sec     = 19800;
+// NTP Time Configuration
+const long  gmtOffset_sec     = 19800; // IST: +5:30
 const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
-// Timers & Lock Settings
+// Timers & State
 const unsigned long CLOCK_TIMEOUT_MS = 20000;
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
 bool isDeviceLocked                  = false;
 
-// Peek Clock
 bool isPeekClockActive               = false;
 unsigned long peekClockStartTime     = 0;
 const unsigned long PEEK_CLOCK_DURATION = 3000;
 
-// Banner Notification
 bool isBannerActive                  = false;
 unsigned long bannerStartTime        = 0;
 const unsigned long BANNER_DURATION  = 1200;
@@ -110,24 +121,17 @@ void setOledBrightness(uint8_t contrast) {
   display.ssd1306_command(contrast);
 }
 
-// LED Controller
-bool alertLedActive = false;
-unsigned long alertLedStart = 0;
-const unsigned long LED_ALERT_DURATION = 120;
-
 void triggerLedAlert() {
   alertLedActive = true;
   alertLedStart = millis();
   digitalWrite(EXTERNAL_LED, HIGH);
-  digitalWrite(BOARD_LED, LOW);
 }
 
 void shutoffLeds() {
   digitalWrite(EXTERNAL_LED, LOW);
-  digitalWrite(BOARD_LED, HIGH);
 }
 
-// Emotion Engine Definitions
+// Emotion Engine
 enum EmoState {
   EMO_NORMAL,
   EMO_SUSPICIOUS,
@@ -163,7 +167,7 @@ bool isNightWindow() {
   return false;
 }
 
-// IR
+// IR Decoder
 const uint16_t kCaptureBufferSize = 1024;
 const uint8_t kTimeout = 50;
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kTimeout, true);
@@ -245,12 +249,14 @@ float dynamicThreshold = 2.4;
 int waveBuffer[WAVE_POINTS];
 int waveIndex = 0;
 
+// Device Modes
 enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
   MODE_RF_TRIPWIRE = 2,
   MODE_IR_DECODER = 3,
-  MODE_AP_CONFIG = 4
+  MODE_NRF_SCANNER = 4,
+  MODE_AP_CONFIG = 5
 };
 
 DeviceMode currentMode = MODE_RADAR;
@@ -476,31 +482,26 @@ void handleRoot() {
     html += "</select><label>Password:</label>";
     html += "<input type='password' name='pass' value='" + String(target_password) + "'><br>";
 
-    // Manual Brightness Slider
     html += "<div class='slider-container'>";
     html += "<label>Manual Brightness: <span id='bVal' class='val-badge'>" + String(userBrightness) + "</span></label>";
     html += "<input type='range' name='bright' min='1' max='255' value='" + String(userBrightness) + "' oninput=\"document.getElementById('bVal').innerText=this.value;\">";
     html += "</div>";
 
-    // Auto-Dim Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autodim' name='autodim' value='1'" + String(autoDimEnabled ? " checked" : "") + ">";
     html += "<label for='autodim' style='font-size:13px;cursor:pointer;color:#eee;'>Auto-dim on Lock / Clock</label>";
     html += "</div>";
 
-    // Auto-Lock Toggle
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='autolock' name='autolock' value='1'" + String(autoLockEnabled ? " checked" : "") + ">";
     html += "<label for='autolock' style='font-size:13px;cursor:pointer;color:#eee;'>Enable Auto-Lock (EMO Face)</label>";
     html += "</div>";
 
-    // Auto-Lock Seconds Slider
     html += "<div class='slider-container'>";
     html += "<label>Lock Timeout (sec): <span id='lVal' class='val-badge'>" + String(autoLockSeconds) + "s</span></label>";
     html += "<input type='range' name='locksec' min='15' max='300' step='5' value='" + String(autoLockSeconds) + "' oninput=\"document.getElementById('lVal').innerText=this.value+'s';\">";
     html += "</div>";
 
-    // Daily Routines Section
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Daily Messages</h3>";
     html += "<div class='toggle-container'>";
     html += "<input type='checkbox' id='gmorning' name='gmorning' value='1'" + String(goodMorningEnabled ? " checked" : "") + ">";
@@ -512,7 +513,6 @@ void handleRoot() {
     html += "<label for='gnight' style='font-size:13px;cursor:pointer;color:#eee;'>Good Night at 10:30 PM</label>";
     html += "</div>";
 
-    // Birthday Wish Schedule
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Match Clock & Wish</h3>";
     html += "<label>Wish Message:</label>";
     html += "<input type='text' name='smstext' maxlength='60' placeholder='Happy Birthday Ankita!' value=''>";
@@ -581,6 +581,14 @@ void handleConfigSave() {
   }
 }
 
+void initNrfScanner() {
+  radio.begin();
+  radio.setAutoAck(false);
+  radio.startListening();
+  radio.stopListening();
+  memset(nrfValues, 0, sizeof(nrfValues));
+}
+
 void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
@@ -589,6 +597,7 @@ void configureMode(DeviceMode newMode) {
   server.stop();
   wifi_promiscuous_enable(0);
   irrecv.disableIRIn();
+  radio.powerDown();
   shutoffLeds();
   alertLedActive = false;
 
@@ -627,6 +636,13 @@ void configureMode(DeviceMode newMode) {
       WiFi.mode(WIFI_OFF);
       irrecv.setUnknownThreshold(12);
       irrecv.enableIRIn();
+      break;
+
+    case MODE_NRF_SCANNER:
+      WiFi.disconnect();
+      WiFi.mode(WIFI_OFF);
+      radio.powerUp();
+      initNrfScanner();
       break;
 
     case MODE_AP_CONFIG: {
@@ -735,7 +751,6 @@ void drawAutoLockBanner() {
   display.display();
 }
 
-// 30-second celebration sequence alternating marquee text with context-aware face
 void drawBirthdayWishUI() {
   unsigned long now = millis();
   unsigned long elapsed = now - smsAlertStartTime;
@@ -796,7 +811,6 @@ void drawBirthdayWishUI() {
   }
 }
 
-// Checks Clock for Birthday Wishes & Daily Routines (7:00 AM & 10:30 PM)
 void checkScheduledSms() {
   if (isSmsAlertActive) return;
 
@@ -805,7 +819,6 @@ void checkScheduledSms() {
 
   struct tm* t = localtime(&now);
 
-  // 1. Daily Good Morning Check (07:00 AM)
   if (goodMorningEnabled && t->tm_hour == 7 && t->tm_min == 0) {
     if (lastMorningTriggerDay != t->tm_mday) {
       lastMorningTriggerDay = t->tm_mday;
@@ -818,7 +831,6 @@ void checkScheduledSms() {
     }
   }
 
-  // 2. Daily Good Night Check (10:30 PM = 22:30)
   if (goodNightEnabled && t->tm_hour == 22 && t->tm_min == 30) {
     if (lastNightTriggerDay != t->tm_mday) {
       lastNightTriggerDay = t->tm_mday;
@@ -831,7 +843,6 @@ void checkScheduledSms() {
     }
   }
 
-  // 3. Custom Scheduled Calendar Wish Check
   if (wishTarget.armed) {
     if ((t->tm_year + 1900) == (int)wishTarget.year &&
         (t->tm_mon + 1)     == (int)wishTarget.month &&
@@ -849,7 +860,6 @@ void checkScheduledSms() {
   }
 }
 
-// Living Animated Desk-Buddy Face
 void drawEmoFace() {
   unsigned long now = millis();
 
@@ -1172,6 +1182,60 @@ void drawDecoderUI() {
   display.display();
 }
 
+// 2.4GHz nRF24L01 Spectrum & Packet Counter UI
+void drawNrfScannerUI() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.printf("2.4G PKTS:%u", (unsigned int)totalNrfHits);
+  display.setCursor(82, 0);
+  display.printf("PK:%d", peakChannel);
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  for (int x = 0; x < 128; x++) {
+    int barHeight = map(nrfValues[x], 0, 15, 0, 44);
+    barHeight = constrain(barHeight, 0, 44);
+    if (barHeight > 0) {
+      display.drawFastVLine(x, 63 - barHeight, barHeight, SSD1306_WHITE);
+    }
+  }
+
+  display.drawPixel(12, 11, SSD1306_WHITE);  // Ch 1 (2412 MHz)
+  display.drawPixel(37, 11, SSD1306_WHITE);  // Ch 6 (2437 MHz)
+  display.drawPixel(62, 11, SSD1306_WHITE);  // Ch 11 (2462 MHz)
+
+  display.display();
+}
+
+void scanNrfChannels() {
+  peakValue = 0;
+  for (uint8_t i = 0; i < NRF_NUM_CHANNELS; i++) {
+    radio.setChannel(i);
+    radio.startListening();
+    delayMicroseconds(130);
+    radio.stopListening();
+
+    if (radio.testCarrier() || radio.testRPD()) {
+      if (nrfValues[i] < 15) nrfValues[i]++;
+      totalNrfHits++;
+      triggerLedAlert();
+    } else {
+      if (nrfValues[i] > 0) nrfValues[i]--;
+    }
+
+    if (nrfValues[i] > peakValue) {
+      peakValue = nrfValues[i];
+      peakChannel = i;
+    }
+  }
+
+  if (peakValue >= 10 && isDeviceLocked) {
+    setEmotion(EMO_SHOCKED);
+  }
+}
+
 // Startup connection routine: Clean display showing COCO, SSID, and Time Sync
 void syncTimeAtStartup() {
   shutoffLeds();
@@ -1272,14 +1336,10 @@ void syncTimeAtStartup() {
 
 void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
-  pinMode(BOARD_LED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(IR_RECV_PIN, INPUT_PULLUP);
 
   shutoffLeds();
-
-  Serial.begin(115200);
-  delay(100);
 
   loadCredentials();
 
@@ -1294,11 +1354,14 @@ void setup() {
 
   setOledBrightness(userBrightness);
 
+  SPI.begin();
+  radio.begin();
+  radio.powerDown();
+
   syncTimeAtStartup();
 
   lastUserActivity = millis();
 
-  // Directly enter active radar working mode
   if (currentMode != MODE_AP_CONFIG) {
     configureMode(MODE_RADAR);
   }
@@ -1307,11 +1370,9 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Birthday / Daily Greeting Party Strobe / Normal Alert Shutoff
   if (isSmsAlertActive) {
     bool strobe = ((currentMillis / 100) % 2 == 0);
     digitalWrite(EXTERNAL_LED, strobe ? HIGH : LOW);
-    digitalWrite(BOARD_LED, strobe ? LOW : HIGH);
   } else {
     if (alertLedActive && (currentMillis - alertLedStart >= LED_ALERT_DURATION)) {
       alertLedActive = false;
@@ -1319,17 +1380,14 @@ void loop() {
     }
   }
 
-  // 2. Exact match check between live display clock, target schedule, and daily routines
   checkScheduledSms();
 
-  // 3. Auto-expire Birthday / Daily Wish after 30 seconds
   if (isSmsAlertActive && (currentMillis - smsAlertStartTime >= SMS_DISPLAY_DURATION)) {
     isSmsAlertActive = false;
     shutoffLeds();
     display.clearDisplay();
   }
 
-  // 4. Button Engine
   if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
@@ -1412,6 +1470,7 @@ void loop() {
           if (currentMode == MODE_RADAR)             nextMode = MODE_SCANNER;
           else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
           else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
+          else if (currentMode == MODE_IR_DECODER)  nextMode = MODE_NRF_SCANNER;
           else                                      nextMode = MODE_RADAR;
 
           configureMode(nextMode);
@@ -1420,7 +1479,6 @@ void loop() {
     }
   }
 
-  // 5. Automated Locks and Screen Savers
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
     if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
@@ -1447,7 +1505,6 @@ void loop() {
     display.clearDisplay();
   }
 
-  // 6. UI Handlers: SMS / Routine Alert takes TOP PRIORITY over everything
   if (isSmsAlertActive) {
     drawBirthdayWishUI();
   } else if (isBannerActive) {
@@ -1471,7 +1528,6 @@ void loop() {
     }
   }
 
-  // 7. Sensor execution
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
@@ -1536,9 +1592,7 @@ void loop() {
         float delta = abs((float)currentRssi - baselineRSSI);
 
         if (isCalibrating) {
-          if (delta > maxNoiseObserved) {
-            maxNoiseObserved = delta;
-          }
+          if (delta > maxNoiseObserved) maxNoiseObserved = delta;
 
           unsigned long elapsed = currentMillis - calibrationStartTime;
           if (elapsed >= 5000) {
@@ -1567,14 +1621,10 @@ void loop() {
         if (delta >= dynamicThreshold) {
           lastMotionDetected = currentMillis;
           triggerLedAlert();
-
-          if (isDeviceLocked) {
-            setEmotion(EMO_SHOCKED);
-          }
+          if (isDeviceLocked) setEmotion(EMO_SHOCKED);
         }
 
         bool isMotionActive = (currentMillis - lastMotionDetected < ALARM_HOLD_TIME);
-
         int yVal = 42 - (int)(((float)currentRssi - baselineRSSI) * 3.5);
         yVal = constrain(yVal, 22, 62);
 
@@ -1618,6 +1668,16 @@ void loop() {
       if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 100)) {
         lastDisplayDraw = currentMillis;
         drawDecoderUI();
+      }
+      break;
+    }
+
+    case MODE_NRF_SCANNER: {
+      scanNrfChannels();
+
+      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 40)) {
+        lastDisplayDraw = currentMillis;
+        drawNrfScannerUI();
       }
       break;
     }
