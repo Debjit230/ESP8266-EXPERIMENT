@@ -25,11 +25,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define OLED_SDA      D3
 #define OLED_SCL      D4
 #define IR_RECV_PIN   D2
-#define BUTTON_PIN    D1    // GPIO5: Clean reliable pullup, no serial conflict
-#define EXTERNAL_LED  D0    // GPIO16: Clean output
+#define BUTTON_PIN    D1    // GPIO5
+#define EXTERNAL_LED  D0    // GPIO16
 
 // nRF24L01 Pin Definitions (Hardware HSPI: SCK=D5, MISO=D6, MOSI=D7)
-#define NRF_CE_PIN    3     // GPIO3 (RX pin used strictly as digital output for CE)
+#define NRF_CE_PIN    3     // GPIO3 (RX pin used as CE output)
 #define NRF_CSN_PIN   D8    // GPIO15 (CSN)
 RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
 
@@ -44,6 +44,22 @@ uint8_t nrfValues[NRF_NUM_CHANNELS];
 uint32_t totalNrfHits = 0;
 uint8_t peakChannel = 0;
 uint8_t peakValue = 0;
+
+// Noise Flood State
+uint8_t  floodTechnique    = 0;    // 0 = carrier sweep, 1 = packet flood
+uint8_t  floodChannel      = 0;
+bool     floodRunning      = false;
+uint32_t floodPackets      = 0;
+uint32_t floodPacketsPrev  = 0;
+uint32_t floodRate         = 0;
+unsigned long lastFloodStat = 0;
+
+const uint8_t NOISE_PAYLOAD[32] = {
+  0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,
+  0xDE,0xAD,0xBE,0xEF,0xDE,0xAD,0xBE,0xEF,
+  0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,
+  0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
+};
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "COCO-Desk-Buddy";
@@ -256,7 +272,8 @@ enum DeviceMode {
   MODE_RF_TRIPWIRE = 2,
   MODE_IR_DECODER = 3,
   MODE_NRF_SCANNER = 4,
-  MODE_AP_CONFIG = 5
+  MODE_NOISE_FLOOD = 5,
+  MODE_AP_CONFIG = 6
 };
 
 DeviceMode currentMode = MODE_RADAR;
@@ -288,6 +305,64 @@ unsigned long lastZzzAnim = 0;
 void enterLockScreen();
 void unlockDevice();
 void drawEmoFace();
+
+// ==================== NOISE FLOOD ENGINE ====================
+
+void initNoiseFlood() {
+  radio.powerUp();
+  radio.setAutoAck(false);
+  radio.disableCRC();
+  radio.setDataRate(RF24_2MBPS);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.setRetries(0, 0);
+  radio.openWritingPipe(0xE7E7E7E7E7LL);
+  radio.stopListening();
+
+  if (floodTechnique == 0) {
+    radio.startConstCarrier(RF24_PA_MAX, floodChannel);
+  }
+  floodRunning = true;
+  floodPackets = 0;
+  floodPacketsPrev = 0;
+  floodRate = 0;
+  lastFloodStat = millis();
+}
+
+void stopNoiseFlood() {
+  floodRunning = false;
+  if (floodTechnique == 0) radio.stopConstCarrier();
+  radio.stopListening();
+}
+
+void runNoiseFlood() {
+  if (!floodRunning) return;
+
+  if (floodTechnique == 0) {
+    // Carrier sweep: hop channels fast with constant carrier active
+    floodChannel++;
+    if (floodChannel >= NRF_NUM_CHANNELS) floodChannel = 0;
+    radio.setChannel(floodChannel);
+    triggerLedAlert();
+  } else {
+    // Packet flood: blast 32-byte garbage as fast as SPI allows
+    for (uint8_t burst = 0; burst < 8; burst++) {
+      radio.writeFast(NOISE_PAYLOAD, 32);
+      floodPackets++;
+    }
+    radio.txStandBy(0);
+    triggerLedAlert();
+  }
+
+  // Stats once per second
+  unsigned long now = millis();
+  if (now - lastFloodStat >= 1000) {
+    floodRate = floodPackets - floodPacketsPrev;
+    floodPacketsPrev = floodPackets;
+    lastFloodStat = now;
+  }
+}
+
+// =============================================================
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -645,6 +720,12 @@ void configureMode(DeviceMode newMode) {
       initNrfScanner();
       break;
 
+    case MODE_NOISE_FLOOD:
+      WiFi.disconnect();
+      WiFi.mode(WIFI_OFF);
+      floodRunning = false;
+      break;
+
     case MODE_AP_CONFIG: {
       WiFi.persistent(false);
       WiFi.disconnect(true);
@@ -668,6 +749,8 @@ void enterLockScreen() {
   isClockModeActive = false;
   isPeekClockActive = false;
   resumeMode = currentMode;
+
+  if (currentMode == MODE_NOISE_FLOOD) stopNoiseFlood();
 
   shutoffLeds();
   alertLedActive = false;
@@ -849,7 +932,7 @@ void checkScheduledSms() {
         t->tm_mday          == (int)wishTarget.day &&
         t->tm_hour          == (int)wishTarget.hour &&
         t->tm_min           == (int)wishTarget.minute) {
-      
+
       activeAlertType = 0;
       isSmsAlertActive = true;
       smsAlertStartTime = millis();
@@ -999,10 +1082,10 @@ void drawClockUI() {
 
   display.setTextSize(1);
   display.setCursor(6, 40);
-  display.printf("%s, %02d %s %04d", 
-                 days[timeinfo->tm_wday], 
-                 timeinfo->tm_mday, 
-                 months[timeinfo->tm_mon], 
+  display.printf("%s, %02d %s %04d",
+                 days[timeinfo->tm_wday],
+                 timeinfo->tm_mday,
+                 months[timeinfo->tm_mon],
                  timeinfo->tm_year + 1900);
 
   display.display();
@@ -1209,6 +1292,34 @@ void drawNrfScannerUI() {
   display.display();
 }
 
+// Noise Flood UI
+void drawFloodUI() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.print(floodRunning ? "** FLOODING **" : "FLOOD: PAUSED");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+
+  display.setCursor(0, 13);
+  display.printf("Tech : %s", floodTechnique == 0 ? "CW SWEEP" : "PKT FLOOD");
+
+  if (floodTechnique == 0) {
+    display.setCursor(0, 24);
+    display.printf("Ch   : %d / 128", floodChannel);
+    display.setCursor(0, 34);
+    display.printf("Freq : %d MHz", 2400 + floodChannel);
+  } else {
+    display.setCursor(0, 24);
+    display.printf("Pkts : %u", (unsigned int)floodPackets);
+    display.setCursor(0, 34);
+    display.printf("Rate : %u/s", (unsigned int)floodRate);
+  }
+
+  display.display();
+}
+
 void scanNrfChannels() {
   peakValue = 0;
   for (uint8_t i = 0; i < NRF_NUM_CHANNELS; i++) {
@@ -1236,7 +1347,7 @@ void scanNrfChannels() {
   }
 }
 
-// Startup connection routine: Clean display showing COCO, SSID, and Time Sync
+// Startup connection routine
 void syncTimeAtStartup() {
   shutoffLeds();
 
@@ -1396,7 +1507,7 @@ void loop() {
       buttonIsPressed = true;
       buttonPressStartTime = currentMillis;
       holdThresholdMet = false;
-    } 
+    }
     else if (pinState && buttonIsPressed) {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
@@ -1407,19 +1518,29 @@ void loop() {
           isPeekClockActive = false;
           setEmotion(EMO_LOVE);
         }
+        else if (!isDeviceLocked && currentMode == MODE_NOISE_FLOOD && heldTime >= 500) {
+          holdThresholdMet = true;
+          clickCount = 0;
+          lastUserActivity = currentMillis;
+          if (floodRunning) {
+            stopNoiseFlood();
+          } else {
+            initNoiseFlood();
+          }
+        }
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
           lastUserActivity = currentMillis;
           isClockModeActive = false;
           configureMode(MODE_AP_CONFIG);
-        } 
-        else if (!isDeviceLocked && heldTime >= 400) {
+        }
+        else if (!isDeviceLocked && currentMode != MODE_NOISE_FLOOD && heldTime >= 400) {
           display.fillRect(10, 56, (heldTime - 400) * 108 / 1600, 4, SSD1306_WHITE);
           display.display();
         }
       }
-    } 
+    }
     else if (!pinState && buttonIsPressed) {
       buttonIsPressed = false;
       unsigned long duration = currentMillis - buttonPressStartTime;
@@ -1436,7 +1557,14 @@ void loop() {
         }
         else if (clickCount == 2) {
           clickCount = 0;
-          if (isDeviceLocked) {
+
+          // In flood mode: double-click switches technique
+          if (currentMode == MODE_NOISE_FLOOD) {
+            stopNoiseFlood();
+            floodTechnique ^= 1;
+            initNoiseFlood();
+          }
+          else if (isDeviceLocked) {
             unlockDevice();
           } else {
             enterLockScreen();
@@ -1471,6 +1599,7 @@ void loop() {
           else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
           else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
           else if (currentMode == MODE_IR_DECODER)  nextMode = MODE_NRF_SCANNER;
+          else if (currentMode == MODE_NRF_SCANNER) nextMode = MODE_NOISE_FLOOD;
           else                                      nextMode = MODE_RADAR;
 
           configureMode(nextMode);
@@ -1482,7 +1611,7 @@ void loop() {
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
     if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
-    } 
+    }
     else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
       if (autoDimEnabled) {
@@ -1678,6 +1807,18 @@ void loop() {
       if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 40)) {
         lastDisplayDraw = currentMillis;
         drawNrfScannerUI();
+      }
+      break;
+    }
+
+    case MODE_NOISE_FLOOD: {
+      if (floodRunning) {
+        runNoiseFlood();
+      }
+
+      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 100)) {
+        lastDisplayDraw = currentMillis;
+        drawFloodUI();
       }
       break;
     }
