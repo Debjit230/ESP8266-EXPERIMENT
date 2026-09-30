@@ -41,25 +41,21 @@ const unsigned long LED_ALERT_DURATION = 120;
 // nRF24 Spectrum Scanner Channels
 #define NRF_NUM_CHANNELS 128
 uint8_t nrfValues[NRF_NUM_CHANNELS];
+uint8_t nrfStreak[NRF_NUM_CHANNELS];   // consecutive activity hits per channel
+uint8_t nrfHold[NRF_NUM_CHANNELS];     // freezes a bar briefly after a hit
+uint8_t nrfRxScratch[32];
 uint32_t totalNrfHits = 0;
 uint8_t peakChannel = 0;
 uint8_t peakValue = 0;
 
-// Noise Flood State
-uint8_t  floodTechnique    = 0;    // 0 = carrier sweep, 1 = packet flood
-uint8_t  floodChannel      = 0;
-bool     floodRunning      = false;
-uint32_t floodPackets      = 0;
-uint32_t floodPacketsPrev  = 0;
-uint32_t floodRate         = 0;
-unsigned long lastFloodStat = 0;
+// Detection state (so you KNOW when a transmitter is found)
+bool     nrfRadioOk        = false;
+bool     nrfDeviceFound    = false;
+uint8_t  nrfFoundChannel   = 0;
+unsigned long nrfFoundAt   = 0;
+const uint8_t  NRF_DETECTION_STREAK   = 4;     // consecutive sweeps with signal = confirmed
+const unsigned long NRF_FOUND_BANNER_MS = 5000;
 
-const uint8_t NOISE_PAYLOAD[32] = {
-  0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,
-  0xDE,0xAD,0xBE,0xEF,0xDE,0xAD,0xBE,0xEF,
-  0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,
-  0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
-};
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "COCO-Desk-Buddy";
@@ -272,8 +268,7 @@ enum DeviceMode {
   MODE_RF_TRIPWIRE = 2,
   MODE_IR_DECODER = 3,
   MODE_NRF_SCANNER = 4,
-  MODE_NOISE_FLOOD = 5,
-  MODE_AP_CONFIG = 6
+  MODE_AP_CONFIG = 5
 };
 
 DeviceMode currentMode = MODE_RADAR;
@@ -306,60 +301,20 @@ void enterLockScreen();
 void unlockDevice();
 void drawEmoFace();
 
-// ==================== NOISE FLOOD ENGINE ====================
+// ==================== RF HELPERS ====================
 
-void initNoiseFlood() {
-  radio.powerUp();
+bool ensureNrfRadioReady() {
+  if (nrfRadioOk) return true;
+
+  nrfRadioOk = radio.begin();
+  if (!nrfRadioOk) return false;
+
   radio.setAutoAck(false);
   radio.disableCRC();
   radio.setDataRate(RF24_2MBPS);
   radio.setPALevel(RF24_PA_MAX);
-  radio.setRetries(0, 0);
-  radio.openWritingPipe(0xE7E7E7E7E7LL);
-  radio.stopListening();
-
-  if (floodTechnique == 0) {
-    radio.startConstCarrier(RF24_PA_MAX, floodChannel);
-  }
-  floodRunning = true;
-  floodPackets = 0;
-  floodPacketsPrev = 0;
-  floodRate = 0;
-  lastFloodStat = millis();
-}
-
-void stopNoiseFlood() {
-  floodRunning = false;
-  if (floodTechnique == 0) radio.stopConstCarrier();
-  radio.stopListening();
-}
-
-void runNoiseFlood() {
-  if (!floodRunning) return;
-
-  if (floodTechnique == 0) {
-    // Carrier sweep: hop channels fast with constant carrier active
-    floodChannel++;
-    if (floodChannel >= NRF_NUM_CHANNELS) floodChannel = 0;
-    radio.setChannel(floodChannel);
-    triggerLedAlert();
-  } else {
-    // Packet flood: blast 32-byte garbage as fast as SPI allows
-    for (uint8_t burst = 0; burst < 8; burst++) {
-      radio.writeFast(NOISE_PAYLOAD, 32);
-      floodPackets++;
-    }
-    radio.txStandBy(0);
-    triggerLedAlert();
-  }
-
-  // Stats once per second
-  unsigned long now = millis();
-  if (now - lastFloodStat >= 1000) {
-    floodRate = floodPackets - floodPacketsPrev;
-    floodPacketsPrev = floodPackets;
-    lastFloodStat = now;
-  }
+  radio.setAddressWidth(3);
+  return true;
 }
 
 // =============================================================
@@ -590,7 +545,7 @@ void handleRoot() {
 
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Match Clock & Wish</h3>";
     html += "<label>Wish Message:</label>";
-    html += "<input type='text' name='smstext' maxlength='60' placeholder='Happy Birthday Ankita!' value=''>";
+    html += "<input type='text' name='smstext' maxlength='60' placeholder='Write your msg' value=''>";
     html += "<label>Set Target Date & Time:</label>";
     html += "<input type='datetime-local' name='smstime'>";
 
@@ -657,11 +612,28 @@ void handleConfigSave() {
 }
 
 void initNrfScanner() {
-  radio.begin();
+  if (!ensureNrfRadioReady()) {
+    memset(nrfValues, 0, sizeof(nrfValues));
+    memset(nrfStreak, 0, sizeof(nrfStreak));
+    memset(nrfHold, 0, sizeof(nrfHold));
+    totalNrfHits = 0;
+    nrfDeviceFound = false;
+    return;
+  }
+
   radio.setAutoAck(false);
+  radio.disableCRC();
+  radio.setDataRate(RF24_2MBPS);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.setAddressWidth(3);
+  radio.openReadingPipe(0, (uint64_t)0);   // accept almost anything
   radio.startListening();
   radio.stopListening();
   memset(nrfValues, 0, sizeof(nrfValues));
+  memset(nrfStreak, 0, sizeof(nrfStreak));
+  memset(nrfHold, 0, sizeof(nrfHold));
+  totalNrfHits = 0;
+  nrfDeviceFound = false;
 }
 
 void configureMode(DeviceMode newMode) {
@@ -720,12 +692,6 @@ void configureMode(DeviceMode newMode) {
       initNrfScanner();
       break;
 
-    case MODE_NOISE_FLOOD:
-      WiFi.disconnect();
-      WiFi.mode(WIFI_OFF);
-      floodRunning = false;
-      break;
-
     case MODE_AP_CONFIG: {
       WiFi.persistent(false);
       WiFi.disconnect(true);
@@ -749,8 +715,6 @@ void enterLockScreen() {
   isClockModeActive = false;
   isPeekClockActive = false;
   resumeMode = currentMode;
-
-  if (currentMode == MODE_NOISE_FLOOD) stopNoiseFlood();
 
   shutoffLeds();
   alertLedActive = false;
@@ -1271,69 +1235,136 @@ void drawNrfScannerUI() {
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
-  display.setCursor(0, 0);
-  display.printf("2.4G PKTS:%u", (unsigned int)totalNrfHits);
-  display.setCursor(82, 0);
-  display.printf("PK:%d", peakChannel);
-  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  // Wiring self-test: if the nRF24 doesn't answer on SPI, say so clearly
+  if (!nrfRadioOk) {
+    display.setCursor(0, 0);
+    display.print("--- 2.4G SCANNER ---");
+    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+    display.setTextSize(2);
+    display.setCursor(4, 18);
+    display.print("NRF24 NOT");
+    display.setCursor(4, 38);
+    display.print("FOUND!");
+    display.setTextSize(1);
+    display.setCursor(0, 57);
+    display.print("Check CE/CSN wiring");
+    display.display();
+    return;
+  }
 
-  for (int x = 0; x < 128; x++) {
-    int barHeight = map(nrfValues[x], 0, 15, 0, 44);
-    barHeight = constrain(barHeight, 0, 44);
+  if (nrfDeviceFound) {
+    bool blinkPhase = ((millis() / 140) % 2 == 0);
+    display.fillRect(0, 0, 128, 12, blinkPhase ? SSD1306_WHITE : SSD1306_BLACK);
+    display.setTextColor(blinkPhase ? SSD1306_BLACK : SSD1306_WHITE);
+    display.setCursor(4, 2);
+    display.print("SIGNAL FOUND");
+    display.setCursor(90, 2);
+    display.printf("%d", nrfFoundChannel);
+    display.setTextColor(SSD1306_WHITE);
+  } else {
+    display.setCursor(0, 0);
+    display.printf("PKTS:%u", (unsigned int)totalNrfHits);
+    display.setCursor(54, 0);
+    display.printf("PEAK:%d", peakChannel);
+    display.setCursor(103, 0);
+    display.printf("%dM", 2400 + peakChannel);
+  }
+
+  const int graphLeft = 8;
+  const int graphTop = 20;
+  const int graphRight = 120;
+  const int graphBottom = 58;
+  const int graphWidth = graphRight - graphLeft + 1;
+  const int graphHeight = graphBottom - graphTop + 1;
+
+  display.drawRect(graphLeft, graphTop, graphWidth, graphHeight, SSD1306_WHITE);
+  for (int y = graphTop + 8; y < graphBottom; y += 8) {
+    display.drawFastHLine(graphLeft, y, graphWidth, SSD1306_INVERSE);
+  }
+
+  int prevY = graphBottom;
+  for (int x = 0; x < graphWidth; x++) {
+    int src = map(x, 0, graphWidth - 1, 0, NRF_NUM_CHANNELS - 1);
+    int value = nrfValues[src];
+    int barHeight = map(value, 0, 64, 0, graphHeight - 2);
+    barHeight = constrain(barHeight, 0, graphHeight - 2);
+
+    int screenX = graphRight - x;
+    int y = graphBottom - barHeight;
+
+    if (x > 0) {
+      display.drawLine(screenX + 1, prevY, screenX, y, SSD1306_WHITE);
+    }
+    prevY = y;
+
     if (barHeight > 0) {
-      display.drawFastVLine(x, 63 - barHeight, barHeight, SSD1306_WHITE);
+      display.fillRect(screenX, y, 1, barHeight, SSD1306_WHITE);
     }
   }
 
-  display.drawPixel(12, 11, SSD1306_WHITE);  // Ch 1 (2412 MHz)
-  display.drawPixel(37, 11, SSD1306_WHITE);  // Ch 6 (2437 MHz)
-  display.drawPixel(62, 11, SSD1306_WHITE);  // Ch 11 (2462 MHz)
+  display.setCursor(0, 19);
+  display.print("1");
+  display.setCursor(34, 19);
+  display.print("6");
+  display.setCursor(60, 19);
+  display.print("11");
 
-  display.display();
-}
-
-// Noise Flood UI
-void drawFloodUI() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-
-  display.setCursor(0, 0);
-  display.print(floodRunning ? "** FLOODING **" : "FLOOD: PAUSED");
-  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
-
-  display.setCursor(0, 13);
-  display.printf("Tech : %s", floodTechnique == 0 ? "CW SWEEP" : "PKT FLOOD");
-
-  if (floodTechnique == 0) {
-    display.setCursor(0, 24);
-    display.printf("Ch   : %d / 128", floodChannel);
-    display.setCursor(0, 34);
-    display.printf("Freq : %d MHz", 2400 + floodChannel);
-  } else {
-    display.setCursor(0, 24);
-    display.printf("Pkts : %u", (unsigned int)floodPackets);
-    display.setCursor(0, 34);
-    display.printf("Rate : %u/s", (unsigned int)floodRate);
+  if (peakValue > 4) {
+    int px = constrain((int)peakChannel, 0, 127);
+    int peakX = map(px, 0, NRF_NUM_CHANNELS - 1, graphLeft, graphRight);
+    display.fillTriangle(peakX - 2, graphTop - 1, peakX + 2, graphTop - 1, peakX, graphTop + 4, SSD1306_WHITE);
   }
 
   display.display();
 }
 
 void scanNrfChannels() {
+  if (!nrfRadioOk) return;
+
   peakValue = 0;
+  peakChannel = 0;
+  unsigned long now = millis();
+
   for (uint8_t i = 0; i < NRF_NUM_CHANNELS; i++) {
     radio.setChannel(i);
     radio.startListening();
-    delayMicroseconds(130);
+    delayMicroseconds(350);            // RPD/carrier need RX settle time
+
+    bool rpd = radio.testRPD();
+    bool cd  = radio.testCarrier();
+    uint8_t pk = 0;
+    while (radio.available() && pk < 3) {   // drain up to 3 real packets
+      radio.read(nrfRxScratch, 32);
+      pk++;
+    }
+    if (radio.available()) radio.flush_rx();
+
     radio.stopListening();
 
-    if (radio.testCarrier() || radio.testRPD()) {
-      if (nrfValues[i] < 15) nrfValues[i]++;
+    bool activity = rpd || cd || (pk > 0);
+
+    if (activity) {
+      if (nrfValues[i] <= 60) nrfValues[i] += 4;   // fast attack
+      nrfStreak[i]++;
       totalNrfHits++;
       triggerLedAlert();
+
+      // Signal present for several sweeps in a row = real device, not noise
+      if (nrfStreak[i] >= NRF_DETECTION_STREAK) {
+        nrfDeviceFound = true;
+        nrfFoundChannel = i;
+        nrfFoundAt = now;
+        if (isDeviceLocked) setEmotion(EMO_SHOCKED);
+      }
     } else {
-      if (nrfValues[i] > 0) nrfValues[i]--;
+      nrfStreak[i] = 0;
+      if (nrfHold[i] > 0) {
+        nrfHold[i]--;                             // freeze the bar so you can see it
+      } else if (nrfValues[i] >= 4) {
+        nrfHold[i] = 30;                          // ~1.2s hold after last hit
+      } else if (nrfValues[i] > 0) {
+        nrfValues[i]--;                           // slow decay
+      }
     }
 
     if (nrfValues[i] > peakValue) {
@@ -1342,8 +1373,8 @@ void scanNrfChannels() {
     }
   }
 
-  if (peakValue >= 10 && isDeviceLocked) {
-    setEmotion(EMO_SHOCKED);
+  if (nrfDeviceFound && (now - nrfFoundAt > NRF_FOUND_BANNER_MS)) {
+    nrfDeviceFound = false;
   }
 }
 
@@ -1466,7 +1497,7 @@ void setup() {
   setOledBrightness(userBrightness);
 
   SPI.begin();
-  radio.begin();
+  nrfRadioOk = radio.begin();
   radio.powerDown();
 
   syncTimeAtStartup();
@@ -1518,16 +1549,6 @@ void loop() {
           isPeekClockActive = false;
           setEmotion(EMO_LOVE);
         }
-        else if (!isDeviceLocked && currentMode == MODE_NOISE_FLOOD && heldTime >= 500) {
-          holdThresholdMet = true;
-          clickCount = 0;
-          lastUserActivity = currentMillis;
-          if (floodRunning) {
-            stopNoiseFlood();
-          } else {
-            initNoiseFlood();
-          }
-        }
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
@@ -1535,7 +1556,7 @@ void loop() {
           isClockModeActive = false;
           configureMode(MODE_AP_CONFIG);
         }
-        else if (!isDeviceLocked && currentMode != MODE_NOISE_FLOOD && heldTime >= 400) {
+        else if (!isDeviceLocked && heldTime >= 400) {
           display.fillRect(10, 56, (heldTime - 400) * 108 / 1600, 4, SSD1306_WHITE);
           display.display();
         }
@@ -1558,13 +1579,7 @@ void loop() {
         else if (clickCount == 2) {
           clickCount = 0;
 
-          // In flood mode: double-click switches technique
-          if (currentMode == MODE_NOISE_FLOOD) {
-            stopNoiseFlood();
-            floodTechnique ^= 1;
-            initNoiseFlood();
-          }
-          else if (isDeviceLocked) {
+          if (isDeviceLocked) {
             unlockDevice();
           } else {
             enterLockScreen();
@@ -1599,7 +1614,6 @@ void loop() {
           else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
           else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
           else if (currentMode == MODE_IR_DECODER)  nextMode = MODE_NRF_SCANNER;
-          else if (currentMode == MODE_NRF_SCANNER) nextMode = MODE_NOISE_FLOOD;
           else                                      nextMode = MODE_RADAR;
 
           configureMode(nextMode);
@@ -1811,18 +1825,6 @@ void loop() {
       break;
     }
 
-    case MODE_NOISE_FLOOD: {
-      if (floodRunning) {
-        runNoiseFlood();
-      }
-
-      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 100)) {
-        lastDisplayDraw = currentMillis;
-        drawFloodUI();
-      }
-      break;
-    }
-
     case MODE_AP_CONFIG: {
       server.handleClient();
 
@@ -1833,4 +1835,4 @@ void loop() {
       break;
     }
   }
-}
+}    
