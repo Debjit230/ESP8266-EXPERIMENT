@@ -8,12 +8,13 @@
 #include <SoftwareSerial.h>
 #include <TinyGPSPlus.h>
 #include <time.h>
+#include <sys/time.h>
 
 extern "C" {
   #include "user_interface.h"
 }
 
-// Display Settings (SSD1306 128x64 I2C)
+// Display Configuration (SSD1306 128x64 I2C)
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
@@ -22,10 +23,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // Hardware Pin Definitions
 #define OLED_SDA      D3   // GPIO0
 #define OLED_SCL      D4   // GPIO2
-#define BUTTON_PIN    D1   // GPIO5
-#define EXTERNAL_LED  D0   // GPIO16
+#define BUTTON_PIN    D1   // GPIO5: Active-LOW button
+#define EXTERNAL_LED  D0   // GPIO16: Indicator / Alert LED
 
-// GPS Module Serial Configuration (NEO-6M / NEO-8M)
+// GPS Configuration (NEO-6M / NEO-8M)
 #define GPS_RX_PIN    D5   // GPIO14 (Connects to GPS TX)
 #define GPS_TX_PIN    D6   // GPIO12 (Connects to GPS RX)
 #define GPS_BAUD      9600
@@ -33,7 +34,12 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
 TinyGPSPlus gps;
 
-// LED Controller Variables
+// Time & GPS Sync Flags
+bool gpsTimeSynced = false;
+unsigned long lastGpsSyncTime = 0;
+const unsigned long GPS_RESYNC_INTERVAL = 600000UL; // Resync every 10 minutes
+
+// LED Alert System
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
 const unsigned long LED_ALERT_DURATION = 120;
@@ -42,7 +48,7 @@ const unsigned long LED_ALERT_DURATION = 120;
 const char* AP_CONFIG_SSID = "COCO-Desk-Buddy";
 const char* AP_CONFIG_PASS = "12345678";
 
-// EEPROM Storage Settings
+// EEPROM Storage Addresses
 #define EEPROM_SIZE 256
 #define EEPROM_MAGIC 0x5A
 #define EEPROM_BRIGHT_ADDR          97
@@ -62,7 +68,7 @@ bool autoDimEnabled      = false;
 bool autoLockEnabled     = true;
 uint16_t autoLockSeconds = 60;
 
-// Daily Routine Toggles
+// Daily Routine Flags
 bool goodMorningEnabled  = true;
 bool goodNightEnabled    = true;
 int lastMorningTriggerDay = -1;
@@ -95,7 +101,7 @@ const long  gmtOffset_sec     = 19800;
 const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
-// Timers & States
+// Device State Timers
 const unsigned long CLOCK_TIMEOUT_MS = 20000;
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
@@ -122,6 +128,30 @@ void triggerLedAlert() {
 
 void shutoffLeds() {
   digitalWrite(EXTERNAL_LED, LOW);
+}
+
+// Direct Satellite UTC to Local IST Epoch Synchronization
+void syncSystemTimeFromGPS() {
+  if (!gps.time.isValid() || !gps.date.isValid()) return;
+  if (gps.date.year() < 2024) return; // Prevent updating from uninitialized cold-start data
+
+  struct tm t;
+  t.tm_year = gps.date.year() - 1900;
+  t.tm_mon  = gps.date.month() - 1;
+  t.tm_mday = gps.date.day();
+  t.tm_hour = gps.time.hour();
+  t.tm_min  = gps.time.minute();
+  t.tm_sec  = gps.time.second();
+  t.tm_isdst = 0;
+
+  time_t utcEpoch = mktime(&t);
+  time_t localEpoch = utcEpoch + gmtOffset_sec; // Add IST +5:30 offset (19800s)
+
+  struct timeval tv = { .tv_sec = localEpoch, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+
+  gpsTimeSynced = true;
+  lastGpsSyncTime = millis();
 }
 
 // Emotion Engine
@@ -160,7 +190,7 @@ bool isNightWindow() {
   return false;
 }
 
-// Wi-Fi Radar
+// Wi-Fi Promiscuous Radar
 #define MAX_TARGETS 8
 struct Target {
   uint8_t mac[6];
@@ -215,7 +245,7 @@ unsigned long lastScanTime = 0;
 const unsigned long SCAN_INTERVAL = 5000;
 bool scanningInProgress = false;
 
-// Tripwire
+// RF Tripwire
 const unsigned long SAMPLE_RATE_MS = 50;
 const float EMA_ALPHA = 0.08;
 float baselineRSSI = 0.0;
@@ -232,7 +262,7 @@ float dynamicThreshold = 2.4;
 int waveBuffer[WAVE_POINTS];
 int waveIndex = 0;
 
-// Device Modes
+// Device Operating Modes
 enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
@@ -244,7 +274,7 @@ enum DeviceMode {
 DeviceMode currentMode = MODE_RADAR;
 DeviceMode resumeMode  = MODE_RADAR;
 
-// Button
+// Interactive Multi-Click Button Engine
 unsigned long lastButtonCheck = 0;
 bool buttonIsPressed = false;
 unsigned long buttonPressStartTime = 0;
@@ -253,7 +283,7 @@ int clickCount = 0;
 unsigned long lastClickTime = 0;
 const unsigned long DOUBLE_CLICK_GAP = 350;
 
-// Eyes
+// EMO Face Physics
 float currentEyeX = 0.0;
 float currentEyeY = 0.0;
 float targetEyeX  = 0.0;
@@ -966,6 +996,10 @@ void drawClockUI() {
                  months[timeinfo->tm_mon], 
                  timeinfo->tm_year + 1900);
 
+  // Sync Indicator
+  display.setCursor(6, 54);
+  display.print(gpsTimeSynced ? "Source: GPS Atomic" : "Source: Wi-Fi NTP");
+
   display.display();
 }
 
@@ -1118,7 +1152,7 @@ void drawTripwireUI(float delta, int currentRssi, bool motionAlert) {
   display.display();
 }
 
-// Dedicated GPS UI for 128x64 OLED
+// GPS UI with Coordinates, Fix Status & Local IST Time
 void drawGpsUI() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
@@ -1129,38 +1163,40 @@ void drawGpsUI() {
   if (gps.location.isValid()) {
     display.printf("FIX (%d SAT)", gps.satellites.value());
   } else {
-    display.printf("SEARCH (%d SAT)", gps.satellites.value());
+    display.printf("LOCKING (%d SAT)", gps.satellites.value());
   }
   display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
   if (gps.location.isValid()) {
     display.setCursor(0, 13);
     display.printf("LAT: %.5f", gps.location.lat());
-    display.setCursor(0, 24);
+    display.setCursor(0, 23);
     display.printf("LON: %.5f", gps.location.lng());
 
-    display.setCursor(0, 36);
+    display.setCursor(0, 33);
     display.printf("ALT: %.1fm  SPD: %.1f", gps.altitude.meters(), gps.speed.kmph());
 
-    if (gps.time.isValid()) {
-      int hr = (gps.time.hour() + 5 + ((gps.time.minute() + 30) >= 60 ? 1 : 0)) % 24; // Convert UTC to IST (+5:30)
-      int mn = (gps.time.minute() + 30) % 60;
-      display.setCursor(0, 48);
-      display.printf("IST: %02d:%02d:%02d", hr, mn, gps.time.second());
-    }
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    display.setCursor(0, 44);
+    display.printf("IST: %02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+
+    display.setCursor(0, 54);
+    display.printf("DATE: %02d-%02d-%04d", t->tm_mday, t->tm_mon + 1, t->tm_year + 1900);
   } else {
-    display.setCursor(10, 24);
-    display.print("Waiting for lock...");
-    display.setCursor(10, 38);
-    display.printf("Chars Rx: %lu", gps.charsProcessed());
-    display.setCursor(10, 50);
-    display.print("Keep antenna open!");
+    display.setCursor(8, 20);
+    display.print("Awaiting Satellites");
+    display.setCursor(8, 32);
+    display.printf("Raw Bytes: %lu", gps.charsProcessed());
+    display.setCursor(8, 44);
+    display.printf("Fix Age  : %lums", gps.location.age());
+    display.setCursor(8, 55);
+    display.print(gpsTimeSynced ? "Time: GPS Clock OK" : "Keep antenna skyward");
   }
 
   display.display();
 }
 
-// Clean static startup on 128x64 OLED
 void syncTimeAtStartup() {
   shutoffLeds();
 
@@ -1188,7 +1224,7 @@ void syncTimeAtStartup() {
 
   unsigned long start = millis();
   int dotCount = 0;
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 7000) {
     if (digitalRead(BUTTON_PIN) == LOW) {
       configureMode(MODE_AP_CONFIG);
       return;
@@ -1251,10 +1287,12 @@ void syncTimeAtStartup() {
     display.drawFastHLine(14, 20, 100, SSD1306_WHITE);
 
     display.setTextSize(1);
-    display.setCursor(0, 30);
-    display.print("Wi-Fi Timeout!");
+    display.setCursor(0, 28);
+    display.print("Wi-Fi Offline.");
+    display.setCursor(0, 42);
+    display.print("Using GPS Time Sync...");
     display.display();
-    delay(1000);
+    delay(1200);
   }
 }
 
@@ -1278,7 +1316,7 @@ void setup() {
 
   setOledBrightness(userBrightness);
 
-  // Initialize GPS Serial
+  // Initialize GPS UART
   gpsSerial.begin(GPS_BAUD);
 
   syncTimeAtStartup();
@@ -1293,12 +1331,22 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Read GPS UART stream continuously
+  // 1. Process GPS UART Stream
   while (gpsSerial.available() > 0) {
-    gps.encode(gpsSerial.read());
+    if (gps.encode(gpsSerial.read())) {
+      // Sync clock immediately when satellite sentence carries valid date/time
+      if (!gpsTimeSynced && gps.time.isValid() && gps.date.isValid()) {
+        syncSystemTimeFromGPS();
+      }
+    }
   }
 
-  // 1. Birthday / Alert LED Strobe
+  // Periodic GPS Clock Drift Resync
+  if (gpsTimeSynced && (currentMillis - lastGpsSyncTime >= GPS_RESYNC_INTERVAL)) {
+    syncSystemTimeFromGPS();
+  }
+
+  // 2. Birthday / Alert LED Strobe
   if (isSmsAlertActive) {
     bool strobe = ((currentMillis / 100) % 2 == 0);
     digitalWrite(EXTERNAL_LED, strobe ? HIGH : LOW);
@@ -1317,7 +1365,7 @@ void loop() {
     display.clearDisplay();
   }
 
-  // 2. Button Engine on D1
+  // 3. Multi-Function Button Engine (D1)
   if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
@@ -1408,7 +1456,7 @@ void loop() {
     }
   }
 
-  // 3. Screen Saver / Auto-Lock
+  // 4. Automated Locks & Screen Dimming
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
     if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
@@ -1435,7 +1483,7 @@ void loop() {
     display.clearDisplay();
   }
 
-  // 4. UI Rendering
+  // 5. Active Display UI
   if (isSmsAlertActive) {
     drawBirthdayWishUI();
   } else if (isBannerActive) {
@@ -1459,7 +1507,7 @@ void loop() {
     }
   }
 
-  // 5. Active Sensing Modes
+  // 6. Sensor Loops
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
